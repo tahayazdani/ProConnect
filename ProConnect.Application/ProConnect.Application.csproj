@@ -6,4 +6,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\ProConnect.Domain\ProConnect.Domain.csproj" />
+    <ProjectReference Include="..\ProConnect.Infrastructure\ProConnect.Infrastructure.csproj" />
+  </ItemGroup>
+
 </Project>

@@ -1,5 +1,8 @@
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using ProConnect.Application.Interface;
+using ProConnect.Application.Service;
 using ProConnect.WebApi.Filter;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Text.Json.Serialization;
@@ -34,7 +37,7 @@ builder.Services.AddRouting(options => options.LowercaseUrls = true);
 // register services 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-
+builder.Services.AddSingleton<IUser, User>();
 
 
 var app = builder.Build();

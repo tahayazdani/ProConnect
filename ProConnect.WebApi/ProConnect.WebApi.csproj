@@ -25,4 +25,8 @@
     <None Remove="..\.dockerignore" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\ProConnect.Application\ProConnect.Application.csproj" />
+  </ItemGroup>
+
 </Project>
