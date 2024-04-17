@@ -1,0 +1,6 @@
+@ProConnect.WebApi_HostAddress = http://localhost:5109
+
+GET {{ProConnect.WebApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
