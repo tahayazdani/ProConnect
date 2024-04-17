@@ -31,6 +31,11 @@ builder.Services.AddCors();
 builder.Services.AddMvc();
 builder.Services.AddRouting(options => options.LowercaseUrls = true);
 
+// register services 
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
+
+
 
 var app = builder.Build();
 

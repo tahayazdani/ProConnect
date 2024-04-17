@@ -5,6 +5,12 @@ VisualStudioVersion = 17.8.34525.116
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProConnect.WebApi", "ProConnect.WebApi\ProConnect.WebApi.csproj", "{04844D09-FA41-491C-BF46-1C7737AE93A4}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProConnect.Infrastructure", "ProConnect.Infrastructure\ProConnect.Infrastructure.csproj", "{D296E119-7B8B-4945-8665-87105E19C9DD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProConnect.Application", "ProConnect.Application\ProConnect.Application.csproj", "{C2168E99-538B-4D97-9CDB-F75A725DD8B0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProConnect.Domain", "ProConnect.Domain\ProConnect.Domain.csproj", "{461BE655-E5D9-4B7B-8D21-64F6CC05CF17}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +21,18 @@ Global
 		{04844D09-FA41-491C-BF46-1C7737AE93A4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{04844D09-FA41-491C-BF46-1C7737AE93A4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{04844D09-FA41-491C-BF46-1C7737AE93A4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D296E119-7B8B-4945-8665-87105E19C9DD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D296E119-7B8B-4945-8665-87105E19C9DD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D296E119-7B8B-4945-8665-87105E19C9DD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D296E119-7B8B-4945-8665-87105E19C9DD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C2168E99-538B-4D97-9CDB-F75A725DD8B0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C2168E99-538B-4D97-9CDB-F75A725DD8B0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C2168E99-538B-4D97-9CDB-F75A725DD8B0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C2168E99-538B-4D97-9CDB-F75A725DD8B0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{461BE655-E5D9-4B7B-8D21-64F6CC05CF17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{461BE655-E5D9-4B7B-8D21-64F6CC05CF17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{461BE655-E5D9-4B7B-8D21-64F6CC05CF17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{461BE655-E5D9-4B7B-8D21-64F6CC05CF17}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
