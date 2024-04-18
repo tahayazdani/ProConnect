@@ -1,16 +1,21 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using ProConnect.Application.ErrorHandler;
 using ProConnect.Application.Interface;
 using ProConnect.Application.Service;
+using ProConnect.Domain.Config;
+using ProConnect.Infrastructure.Interface;
+using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.Filter;
 using Swashbuckle.AspNetCore.SwaggerGen;
+using System.Configuration;
 using System.Text.Json.Serialization;
 
+    
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddApiVersioning(config =>
@@ -33,12 +38,18 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 builder.Services.AddCors();
 builder.Services.AddMvc();
 builder.Services.AddRouting(options => options.LowercaseUrls = true);
+builder.Services.AddHttpClient();
 
 // register services 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-builder.Services.AddSingleton<IUser, User>();
+builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
+builder.Services.AddSingleton<IUserService, UserService>();
+builder.Services.AddSingleton<IUserRepository, UserRepository>();
 
+
+// get application configuration
+builder.Configuration.GetValue<ProxyCurlConfig>("proxycurlconfig");
 
 var app = builder.Build();
 
@@ -61,6 +72,6 @@ app.UseCors(x => x
 app.UseAuthorization();
 app.UseCookiePolicy();
 app.MapControllers();
-
+app.UseMiddleware<ExceptionHandlingMiddleware>();
 
 app.Run();

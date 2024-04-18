@@ -1,13 +1,25 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using ProConnect.Application.Interface;
+using ProConnect.Domain.Config;
+using ProConnect.Domain.Request;
 
 namespace ProConnect.WebApi.Controllers
 {
     public class UserController : BaseController
     {
         protected readonly ILogger<UserController> _logger;
-        public UserController(ILogger<UserController> logger)
+        private readonly IUserService _user;
+        private readonly IOptions<ProxyCurlConfig> _proxyCurlConfig;
+
+        public UserController(ILogger<UserController> logger,
+                              IUserService user,
+                              IOptions<ProxyCurlConfig> proxyCurlConfig)
         {
             _logger = logger;
+            _user = user;
+            _proxyCurlConfig = proxyCurlConfig;
         }
 
 
@@ -39,9 +51,11 @@ namespace ProConnect.WebApi.Controllers
 
         [HttpPost]
         [Route("signup")]
-        public IActionResult SignUp()
+        [AllowAnonymous]
+        public async Task<IActionResult> SignUp(SignUpRequest request)
         {
-            return Ok();
+            var response = await _user.SignUp(request, _proxyCurlConfig.Value);
+            return StatusCode(response.statuscode, response);
         }
 
         #endregion
