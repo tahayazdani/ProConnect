@@ -14,5 +14,7 @@ namespace ProConnect.Domain.Request
         }
         public string emailaddress { get; set; }
         public string username { get; set; }
+        public string age { get; set; }
+        public string dateofbirth { get; set; }
     }
 }

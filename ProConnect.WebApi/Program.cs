@@ -8,70 +8,87 @@ using ProConnect.Domain.Config;
 using ProConnect.Infrastructure.Interface;
 using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.Filter;
+using ProConnect.WebApi.Middleware;
+using Serilog;
+using Serilog.Context;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Configuration;
 using System.Text.Json.Serialization;
 
-    
-var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddApiVersioning(config =>
+internal class Program
 {
-    config.DefaultApiVersion = new ApiVersion(1, 0);
-    config.AssumeDefaultVersionWhenUnspecified = true;
-    config.ReportApiVersions = true;
-});
-builder.Services.AddVersionedApiExplorer(options =>
-{
-    options.GroupNameFormat = "'v'VVV";
-    options.SubstituteApiVersionInUrl = true;
-});
-
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddTransient<IConfigureOptions<SwaggerGenOptions>, ConfigureSwaggerOptions>();
-builder.Services.AddSwaggerGen();
-builder.Services.AddControllers().AddJsonOptions(options =>
-                options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-builder.Services.AddCors();
-builder.Services.AddMvc();
-builder.Services.AddRouting(options => options.LowercaseUrls = true);
-builder.Services.AddHttpClient();
-
-// register services 
-builder.Services.AddHttpContextAccessor();
-builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
-builder.Services.AddSingleton<IUserService, UserService>();
-builder.Services.AddSingleton<IUserRepository, UserRepository>();
+    private static void Main(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
 
 
-// get application configuration
-builder.Configuration.GetValue<ProxyCurlConfig>("proxycurlconfig");
+        //Add support to logging with SERILOG
+        builder.Host.UseSerilog((context, configuration) =>
+            configuration.ReadFrom.Configuration(context.Configuration));
 
-var app = builder.Build();
+        // Add services to the container.
+        builder.Services.AddControllers();
+        // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+        builder.Services.AddApiVersioning(config =>
+        {
+            config.DefaultApiVersion = new ApiVersion(1, 0);
+            config.AssumeDefaultVersionWhenUnspecified = true;
+            config.ReportApiVersions = true;
+        });
+        builder.Services.AddVersionedApiExplorer(options =>
+        {
+            options.GroupNameFormat = "'v'VVV";
+            options.SubstituteApiVersionInUrl = true;
+        });
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddTransient<IConfigureOptions<SwaggerGenOptions>, ConfigureSwaggerOptions>();
+        builder.Services.AddSwaggerGen();
+        builder.Services.AddControllers().AddJsonOptions(options =>
+                        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+        builder.Services.AddCors();
+        builder.Services.AddMvc();
+        builder.Services.AddRouting(options => options.LowercaseUrls = true);
+        builder.Services.AddHttpClient();
+
+        // register services 
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
+        builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
+        builder.Services.AddSingleton<IUserService, UserService>();
+        builder.Services.AddSingleton<IUserRepository, UserRepository>();
+
+
+        // get application configuration
+        builder.Services.Configure<ProxyCurlConfig>(builder.Configuration.GetSection("proxycurlconfig"));
+
+
+        var app = builder.Build();
+
+        // Configure the HTTP request pipeline.
+        if (app.Environment.IsDevelopment())
+        {
+            app.UseSwagger();
+            app.UseSwaggerUI();
+        }
+
+        app.UseSerilogRequestLogging();
+        app.UseHttpsRedirection();
+        app.UseRouting();
+        app.UseCors(x => x
+                       .SetIsOriginAllowed(origin => true)
+                       .AllowAnyMethod()
+                       .WithHeaders(new string[] { "accept", "authorization", "content-type", "set-cookie" })
+                       .AllowCredentials()
+                       .WithExposedHeaders("Set-Cookie")
+                   );
+        app.UseAuthorization();
+        app.UseCookiePolicy();
+        app.MapControllers();
+        app.UseMiddleware<LoggingMiddleware>();
+        app.UseMiddleware<ExceptionHandlingMiddleware>();
+
+        app.Run();
+    }
 }
-
-app.UseHttpsRedirection();
-app.UseRouting();
-app.UseCors(x => x
-               .SetIsOriginAllowed(origin => true)
-               .AllowAnyMethod()
-               .WithHeaders(new string[] { "accept", "authorization", "content-type", "set-cookie" })
-               .AllowCredentials()
-               .WithExposedHeaders("Set-Cookie")
-           );
-app.UseAuthorization();
-app.UseCookiePolicy();
-app.MapControllers();
-app.UseMiddleware<ExceptionHandlingMiddleware>();
-
-app.Run();

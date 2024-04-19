@@ -17,4 +17,8 @@
     <ProjectReference Include="..\ProConnect.Infrastructure\ProConnect.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Validation\" />
+  </ItemGroup>
+
 </Project>

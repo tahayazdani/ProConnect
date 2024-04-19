@@ -11,6 +11,7 @@ namespace ProConnect.Application.Interface
 {
     public interface IUserService
     {
-        Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request, ProxyCurlConfig proxyCurlConfig);    
+        Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request, ProxyCurlConfig proxyCurlConfig);
+        Task<PersonResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig);
     }
 }

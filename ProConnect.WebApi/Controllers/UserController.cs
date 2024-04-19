@@ -11,7 +11,7 @@ namespace ProConnect.WebApi.Controllers
     {
         protected readonly ILogger<UserController> _logger;
         private readonly IUserService _user;
-        private readonly IOptions<ProxyCurlConfig> _proxyCurlConfig;
+        private readonly ProxyCurlConfig _proxyCurlConfig;
 
         public UserController(ILogger<UserController> logger,
                               IUserService user,
@@ -19,7 +19,7 @@ namespace ProConnect.WebApi.Controllers
         {
             _logger = logger;
             _user = user;
-            _proxyCurlConfig = proxyCurlConfig;
+            _proxyCurlConfig = proxyCurlConfig.Value;
         }
 
 
@@ -54,7 +54,7 @@ namespace ProConnect.WebApi.Controllers
         [AllowAnonymous]
         public async Task<IActionResult> SignUp(SignUpRequest request)
         {
-            var response = await _user.SignUp(request, _proxyCurlConfig.Value);
+            var response = await _user.SignUp(request, _proxyCurlConfig);
             return StatusCode(response.statuscode, response);
         }
 

@@ -31,20 +31,20 @@ namespace ProConnect.Application.ErrorHandler
             }
             catch (Exception ex)
             {
-                string text = Guid.NewGuid().ToString();
-                if (httpContext.Request != null)
-                {
-                    httpContext.Request.Headers.TryGetValue("correlation-token", out var value);
-                    text = ((!string.IsNullOrEmpty(value)) ? value.ToString() : text);
-                    httpContext.Response.Headers.Add("correlation-token", text);
-                }
+                //string text = Guid.NewGuid().ToString();
+                //if (httpContext.Request != null)
+                //{
+                //    httpContext.Request.Headers.TryGetValue("correlation-token", out var value);
+                //    text = ((!string.IsNullOrEmpty(value)) ? value.ToString() : text);
+                //    httpContext.Response.Headers.Add("correlation-token", text);
+                //}
 
-                _logger.LogError("Something went wrong {CorrelationToken}, {ex}", text, ex);
-                await HandleExceptionAsync(httpContext, ex, text);
+                _logger.LogError(ex, "Something went wrong...");
+                await HandleExceptionAsync(httpContext, ex);
             }
         }
 
-        private static Task HandleExceptionAsync(HttpContext context, Exception exception, string correlationtoken)
+        private static Task HandleExceptionAsync(HttpContext context, Exception exception)
         {
             context.Response.ContentType = "application/json";
             context.Response.StatusCode = 500;
@@ -53,7 +53,7 @@ namespace ProConnect.Application.ErrorHandler
                 body = string.Empty,
                 statuscode = context.Response.StatusCode,
                 errormessage = exception.Message,
-                message = $"something went wrong -- {correlationtoken}"
+                message = $"Something went wrong, Please call administrator."
             }).ToString());
         }
     }
