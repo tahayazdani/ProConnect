@@ -1,4 +1,5 @@
 ﻿using ProConnect.Domain.Request;
+using ProConnect.Domain.Response;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,6 +10,6 @@ namespace ProConnect.Infrastructure.Interface
 {
     public interface IUserRepository
     {
-        Task SignUp(SignUpRequest request);
+        Task SignUp(PersonProfileResponse request);
     }
 }

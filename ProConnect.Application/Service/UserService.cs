@@ -34,10 +34,17 @@ namespace ProConnect.Application.Service
                 // check in db , if the user is NOT exist
 
                 // call proxycurl to fetch person linkedIn info
-                //var person = await GetPersonLinkedInProfile(request.username, proxyCurlConfig);
+                var personProfile = await GetPersonLinkedInProfile(request.public_identifier, proxyCurlConfig);
 
-                // save to database, redis
-                await _userRepository.SignUp(request);
+                // set gender, date of birth and email address
+                personProfile.emailaddress = string.IsNullOrEmpty(personProfile.emailaddress) ? request.emailaddress : personProfile.emailaddress;
+                personProfile.gender = string.IsNullOrEmpty(personProfile.gender) ? request.gender : personProfile.gender;
+                personProfile.birth_date = personProfile.birth_date is null ?
+                                           new date { day = request.birth_date.day, month = request.birth_date.month, year = request.birth_date.year } :
+                                           personProfile.birth_date;
+
+                // save to database, cache to redis
+                await _userRepository.SignUp(personProfile);
             }
             catch (Exception)
             {
@@ -46,7 +53,7 @@ namespace ProConnect.Application.Service
 
             return response;
         }
-        public async Task<PersonResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig)
+        public async Task<PersonProfileResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig)
         {
             // call proxycurl endpoint to pull person info, then register into system
             // params : skills : included , extra : include , _live_scrape : force (no caching)
@@ -62,7 +69,7 @@ namespace ProConnect.Application.Service
                 path += $"&skills={proxyCurlConfig.skills}";
 
             // fetch profile form proxycurl
-            var personInfo = await _httpClientUtilities.GetAsync<PersonResponse>(proxyCurlConfig.baseurl, path, proxyCurlConfig.authorizationtoken);
+            var personInfo = await _httpClientUtilities.GetAsync<PersonProfileResponse>(proxyCurlConfig.baseurl, path, proxyCurlConfig.authorizationtoken);
 
             return personInfo;
         }

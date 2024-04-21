@@ -1,4 +1,5 @@
 ﻿using ProConnect.Domain.Request;
+using ProConnect.Domain.Response;
 using ProConnect.Infrastructure.Interface;
 using System;
 using System.Collections.Generic;
@@ -10,7 +11,7 @@ namespace ProConnect.Infrastructure.Repository
 {
     public class UserRepository : IUserRepository
     {
-        public async Task SignUp(SignUpRequest request)
+        public async Task SignUp(PersonProfileResponse request)
         {
             throw new NotImplementedException();
         }
