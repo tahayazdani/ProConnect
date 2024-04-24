@@ -7,6 +7,7 @@ using ProConnect.Application.Service;
 using ProConnect.Domain.Config;
 using ProConnect.Infrastructure.Interface;
 using ProConnect.Infrastructure.Repository;
+using ProConnect.WebApi.DI;
 using ProConnect.WebApi.Filter;
 using ProConnect.WebApi.Middleware;
 using Serilog;
@@ -22,6 +23,10 @@ internal class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        var configuration = new ConfigurationBuilder()
+               .SetBasePath(Directory.GetCurrentDirectory())
+               .AddJsonFile("appsettings.json")
+               .Build();
 
         //Add support to logging with SERILOG
         builder.Host.UseSerilog((context, configuration) =>
@@ -58,7 +63,8 @@ internal class Program
         builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
-
+        builder.Services.AddCaching(configuration.GetCacheConfiguration());
+        builder.Services.AddCacheAside(configuration.GetCacheAsideConfiguration());
 
         // get application configuration
         builder.Services.Configure<ProxyCurlConfig>(builder.Configuration.GetSection("proxycurlconfig"));

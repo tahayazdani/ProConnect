@@ -10,6 +10,6 @@ namespace ProConnect.Infrastructure.Interface
 {
     public interface IUserRepository
     {
-        Task SignUp(PersonProfileResponse request);
+        Task<SignUpResponse> SignUp(PersonProfileResponse request);
     }
 }
