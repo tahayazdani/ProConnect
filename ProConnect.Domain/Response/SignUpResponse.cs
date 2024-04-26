@@ -13,7 +13,7 @@ namespace ProConnect.Domain.Response
 
         }
         public Guid userid { get; set; }
-        public string username { get; set; }
+        public string public_identifier { get; set; }
         public string profile_pic_url { get; set; }
         public string background_cover_image_url { get; set; }
         public string first_name { get; set; }
@@ -27,5 +27,7 @@ namespace ProConnect.Domain.Response
         public string country_full_name { get; set; }
         public string city { get; set; }
         public string state { get; set; }
+        public string gender { get; set; }
+        public date birth_date { get; set; }
     }
 }

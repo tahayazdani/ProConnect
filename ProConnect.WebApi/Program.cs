@@ -58,21 +58,19 @@ internal class Program
         builder.Services.AddControllers().AddJsonOptions(options =>
                         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
         builder.Services.AddCors();
+        builder.Services.AddTransient<IValidatorInterceptor, ValidatorInterceptor>();
         builder.Services.AddMvc(options =>
         {
             options.Filters.Add(typeof(ValidateModelStateAttribute));
         });
         builder.Services.AddFluentValidationAutoValidation().AddFluentValidationClientsideAdapters();
-
-
-
         builder.Services.Configure<ApiBehaviorOptions>(options =>
         {
             options.SuppressModelStateInvalidFilter = true;
         });
-
         builder.Services.AddRouting(options => options.LowercaseUrls = true);
         builder.Services.AddHttpClient();
+
 
         // register services 
         builder.Services.AddHttpContextAccessor();
@@ -81,6 +79,7 @@ internal class Program
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
+
 
         // register Redis
         builder.Services.AddCaching(configuration.GetCacheConfiguration());

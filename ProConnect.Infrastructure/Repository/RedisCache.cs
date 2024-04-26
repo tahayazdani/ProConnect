@@ -47,12 +47,19 @@ namespace ProConnect.Infrastructure.Repository
             CacheConfig cacheConfig
         )
         {
-            var logMsg = $"Redis.InitializeCache called";
-            Console.WriteLine(logMsg);
+            try
+            {
+                var logMsg = $"Redis.InitializeCache called";
+                Console.WriteLine(logMsg);
 
-            var connection = await ConnectionMultiplexer.ConnectAsync(cacheConfig.connectionstring);
-            _redisConnection = connection.GetDatabase(cacheConfig.databaseindex);
-            return _redisConnection.IsConnected("Ping");
+                var connection = await ConnectionMultiplexer.ConnectAsync(cacheConfig.connectionstring);
+                _redisConnection = connection.GetDatabase(cacheConfig.databaseindex);
+                return _redisConnection.IsConnected("Ping");
+            }
+            catch (Exception)
+            {
+                throw;
+            }
         }
 
         public async Task Set<T>(

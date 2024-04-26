@@ -12,6 +12,7 @@ namespace ProConnect.Domain.Response
         {
             
         }
+        public Guid userid { get; set; }
         public string emailaddress { get; set; }
         public string public_identifier { get; set; } // linkedin username
         public string profile_pic_url { get; set; }

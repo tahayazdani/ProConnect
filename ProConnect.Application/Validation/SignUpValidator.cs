@@ -1,4 +1,6 @@
 ﻿using FluentValidation;
+using ProConnect.Application.ErrorHandler;
+using ProConnect.Domain.Const;
 using ProConnect.Domain.Request;
 using ProConnect.Domain.Response;
 using System;
@@ -13,9 +15,9 @@ namespace ProConnect.Application.Validation
     {
         public SignUpValidator()
         {
-            RuleFor(x => x.emailaddress).EmailAddress().WithMessage("Please enter valid email address.");
-            RuleFor(x => x.birth_date).Must(ValidateBirthDate).WithMessage("Please enter valid birth date.");
-            RuleFor(x => x.birth_date).Must(IsAdult).WithMessage("User must be +18.");
+            RuleFor(x => x.emailaddress).EmailAddress().WithMessage("Please enter valid email address.").WithErrorCode(ErrorCode.INVALIDEMAILADDRESS.ToString());
+            RuleFor(x => x.birth_date).Must(ValidateBirthDate).WithMessage("Please enter valid birth date.").WithErrorCode(ErrorCode.INVALIDDATEFORMAT.ToString());
+            RuleFor(x => x.birth_date).Must(IsAdult).WithMessage("User must be +18.").WithErrorCode(ErrorCode.NOTADULT.ToString());
         }
 
         private bool ValidateBirthDate(date birthdate)
@@ -32,9 +34,6 @@ namespace ProConnect.Application.Validation
                 return false;
 
             return birth.AddYears(18) < DateTime.Now;
-
-
-
         }
     }
 }

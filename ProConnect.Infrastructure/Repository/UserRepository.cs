@@ -11,7 +11,7 @@ namespace ProConnect.Infrastructure.Repository
 {
     public class UserRepository : IUserRepository
     {
-        public async Task<SignUpResponse> SignUp(PersonProfileResponse request)
+        public async Task<SignUpResponse> SignUp(UserRequest request)
         {
             throw new NotImplementedException();
         }

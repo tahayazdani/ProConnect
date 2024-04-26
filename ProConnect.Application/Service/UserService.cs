@@ -15,7 +15,7 @@ using System.Threading.Tasks;
 
 namespace ProConnect.Application.Service
 {
-    public class UserService : BaseService, IUserService
+    public class UserService : IUserService
     {
         private readonly IUserRepository _userRepository;
         private readonly IHttpClientUtilities _httpClientUtilities;
@@ -25,7 +25,8 @@ namespace ProConnect.Application.Service
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
                            ILogger<UserService> logger,
-                           Cache cache)
+                           Cache cache
+                           )
         {
             _userRepository = userRepository;
             _httpClientUtilities = httpClientUtilities;
@@ -40,6 +41,7 @@ namespace ProConnect.Application.Service
             {
                 // check in db , if the user is NOT exist
 
+
                 // call proxycurl to fetch person linkedIn info
                 var cachekey = request.public_identifier;
                 var profileResponse = await _cache.Get(cachekey, async () =>
@@ -47,6 +49,7 @@ namespace ProConnect.Application.Service
                     var personProfile = await GetPersonLinkedInProfile(request.public_identifier, proxyCurlConfig);
 
                     // set gender, date of birth and email address
+                    personProfile.userid = Guid.NewGuid();
                     personProfile.emailaddress = string.IsNullOrEmpty(personProfile.emailaddress) ? request.emailaddress : personProfile.emailaddress;
                     personProfile.gender = string.IsNullOrEmpty(personProfile.gender) ? request.gender : personProfile.gender;
                     personProfile.birth_date = personProfile.birth_date is null ?
@@ -57,7 +60,55 @@ namespace ProConnect.Application.Service
                 }, CacheRegion.PERSONPROFILE);
 
                 // save to database
-                signUpResponse = await _userRepository.SignUp(profileResponse);
+                // user
+                var userrequest = new UserRequest
+                {
+                    userid = profileResponse.userid,
+                    background_cover_image_url = profileResponse.background_cover_image_url,
+                    city = profileResponse.city,
+                    country = profileResponse.country,
+                    country_full_name = profileResponse.country_full_name,
+                    first_name = profileResponse.first_name,
+                    follower_count = profileResponse.follower_count,
+                    full_name = profileResponse.full_name,
+                    headline = profileResponse.headline,
+                    last_name = profileResponse.last_name,
+                    occupation = profileResponse.occupation,
+                    profile_pic_url = profileResponse.profile_pic_url,
+                    state = profileResponse.state,
+                    summary = profileResponse.summary,
+                    public_identifier = profileResponse.public_identifier,
+                    birth_date = profileResponse.birth_date,
+                    gender = profileResponse.gender
+                };
+                signUpResponse = await _userRepository.SignUp(userrequest);
+
+                // experience
+                // education
+                // skills
+
+
+                // generate ViewModel
+                signUpResponse = new SignUpResponse
+                {
+                    userid = profileResponse.userid,
+                    background_cover_image_url = profileResponse.background_cover_image_url,
+                    city = profileResponse.city,
+                    country = profileResponse.country,
+                    country_full_name = profileResponse.country_full_name,
+                    first_name = profileResponse.first_name,
+                    follower_count = profileResponse.follower_count,
+                    full_name = profileResponse.full_name,
+                    headline = profileResponse.headline,
+                    last_name = profileResponse.last_name,
+                    occupation = profileResponse.occupation,
+                    profile_pic_url = profileResponse.profile_pic_url,
+                    state = profileResponse.state,
+                    summary = profileResponse.summary,
+                    public_identifier = profileResponse.public_identifier,
+                    birth_date = profileResponse.birth_date,
+                    gender = profileResponse.gender
+                };
 
                 response = new ProConnectResponse<SignUpResponse>
                 {

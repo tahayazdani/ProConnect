@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using ProConnect.Domain.Const;
 using ProConnect.Domain.Response;
 using System;
 using System.Collections.Generic;
@@ -31,14 +32,6 @@ namespace ProConnect.Application.ErrorHandler
             }
             catch (Exception ex)
             {
-                //string text = Guid.NewGuid().ToString();
-                //if (httpContext.Request != null)
-                //{
-                //    httpContext.Request.Headers.TryGetValue("correlation-token", out var value);
-                //    text = ((!string.IsNullOrEmpty(value)) ? value.ToString() : text);
-                //    httpContext.Response.Headers.Add("correlation-token", text);
-                //}
-
                 _logger.LogError(ex, "Something went wrong...");
                 await HandleExceptionAsync(httpContext, ex);
             }
@@ -47,7 +40,7 @@ namespace ProConnect.Application.ErrorHandler
         private static Task HandleExceptionAsync(HttpContext context, Exception exception)
         {
             context.Response.ContentType = "application/json";
-            context.Response.StatusCode = 500;
+            context.Response.StatusCode = (int)ErrorCode.SYSTEM;
             return context.Response.WriteAsync(JsonConvert.SerializeObject(new ProConnectResponse<string>
             {
                 body = string.Empty,
@@ -58,4 +51,6 @@ namespace ProConnect.Application.ErrorHandler
             }).ToString());
         }
     }
+
+
 }
