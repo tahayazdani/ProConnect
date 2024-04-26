@@ -1,10 +1,15 @@
+using FluentValidation;
+using FluentValidation.AspNetCore;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using ProConnect.Application.ErrorHandler;
 using ProConnect.Application.Interface;
 using ProConnect.Application.Service;
+using ProConnect.Application.Validation;
 using ProConnect.Domain.Config;
+using ProConnect.Domain.Request;
 using ProConnect.Infrastructure.Interface;
 using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.DI;
@@ -53,7 +58,19 @@ internal class Program
         builder.Services.AddControllers().AddJsonOptions(options =>
                         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
         builder.Services.AddCors();
-        builder.Services.AddMvc();
+        builder.Services.AddMvc(options =>
+        {
+            options.Filters.Add(typeof(ValidateModelStateAttribute));
+        });
+        builder.Services.AddFluentValidationAutoValidation().AddFluentValidationClientsideAdapters();
+
+
+
+        builder.Services.Configure<ApiBehaviorOptions>(options =>
+        {
+            options.SuppressModelStateInvalidFilter = true;
+        });
+
         builder.Services.AddRouting(options => options.LowercaseUrls = true);
         builder.Services.AddHttpClient();
 
@@ -63,8 +80,13 @@ internal class Program
         builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
+        builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
+
+        // register Redis
         builder.Services.AddCaching(configuration.GetCacheConfiguration());
         builder.Services.AddCacheAside(configuration.GetCacheAsideConfiguration());
+
+
 
         // get application configuration
         builder.Services.Configure<ProxyCurlConfig>(builder.Configuration.GetSection("proxycurlconfig"));

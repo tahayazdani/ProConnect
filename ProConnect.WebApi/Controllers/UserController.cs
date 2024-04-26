@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using ProConnect.Application.Interface;
+using ProConnect.Application.Validation;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Request;
 

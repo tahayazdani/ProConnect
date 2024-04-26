@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using FluentValidation;
+using Microsoft.Extensions.Logging;
 using ProConnect.Application.Interface;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
@@ -14,7 +15,7 @@ using System.Threading.Tasks;
 
 namespace ProConnect.Application.Service
 {
-    public class UserService : IUserService
+    public class UserService : BaseService, IUserService
     {
         private readonly IUserRepository _userRepository;
         private readonly IHttpClientUtilities _httpClientUtilities;
@@ -39,7 +40,6 @@ namespace ProConnect.Application.Service
             {
                 // check in db , if the user is NOT exist
 
-
                 // call proxycurl to fetch person linkedIn info
                 var cachekey = request.public_identifier;
                 var profileResponse = await _cache.Get(cachekey, async () =>
@@ -56,7 +56,7 @@ namespace ProConnect.Application.Service
                     return personProfile;
                 }, CacheRegion.PERSONPROFILE);
 
-                // save to database, cache to redis
+                // save to database
                 signUpResponse = await _userRepository.SignUp(profileResponse);
 
                 response = new ProConnectResponse<SignUpResponse>

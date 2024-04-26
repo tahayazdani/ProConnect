@@ -12,6 +12,8 @@ namespace ProConnect.Domain.Response
         public T body { get; set; }
         public string message { get; set; }
         public int statuscode { get; set; } = 200;
-        public string errormessage{ get; set; }
+        public string errormessage { get; set; }
+        public List<string> errors { get; set; }
+        public bool issuccessfull { get; set; } = true;
     }
 }

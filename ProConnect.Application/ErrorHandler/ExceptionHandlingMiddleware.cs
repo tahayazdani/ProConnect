@@ -53,7 +53,8 @@ namespace ProConnect.Application.ErrorHandler
                 body = string.Empty,
                 statuscode = context.Response.StatusCode,
                 errormessage = exception.Message,
-                message = $"Something went wrong, Please call administrator."
+                message = $"Something went wrong, Please call administrator.",
+                issuccessfull = false
             }).ToString());
         }
     }
