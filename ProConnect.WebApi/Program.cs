@@ -89,6 +89,7 @@ internal class Program
 
         // get application configuration
         builder.Services.Configure<ProxyCurlConfig>(builder.Configuration.GetSection("proxycurlconfig"));
+        builder.Services.Configure<LinkedInApplicationConfig>(builder.Configuration.GetSection("LinkedInApplicationConfig"));
 
 
         var app = builder.Build();

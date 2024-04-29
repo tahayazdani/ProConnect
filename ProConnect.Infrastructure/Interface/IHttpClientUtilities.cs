@@ -31,5 +31,11 @@ namespace ProConnect.Infrastructure.Interface
 
         string GetFullPath(string baseUrl, string path, bool withForwardSlash = true);
         Task<T> DeserializeJsonResponse<T>(HttpResponseMessage response);
+        Task<string> GetStringAsync(
+             string baseUrl,
+             string path,
+             string authorizationToken = null,
+             Dictionary<string, string> headers = null
+         );
     }
 }

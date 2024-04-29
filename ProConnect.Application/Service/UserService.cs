@@ -50,7 +50,7 @@ namespace ProConnect.Application.Service
 
                     // set gender, date of birth and email address
                     personProfile.userid = Guid.NewGuid();
-                    personProfile.emailaddress = string.IsNullOrEmpty(personProfile.emailaddress) ? request.emailaddress : personProfile.emailaddress;
+                    personProfile.emailaddress = string.IsNullOrEmpty(personProfile.emailaddress) ? request.email : personProfile.emailaddress;
                     personProfile.gender = string.IsNullOrEmpty(personProfile.gender) ? request.gender : personProfile.gender;
                     personProfile.birth_date = personProfile.birth_date is null ?
                                                new date { day = request.birth_date.day, month = request.birth_date.month, year = request.birth_date.year } :
@@ -142,6 +142,19 @@ namespace ProConnect.Application.Service
             var personInfo = await _httpClientUtilities.GetAsync<PersonProfileResponse>(proxyCurlConfig.baseurl, path, proxyCurlConfig.authorizationtoken);
 
             return personInfo;
+        }
+        public async Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage(LinkedInApplicationConfig linkedInApplicationConfig)
+        {
+            var encoded_url = Encoding.UTF8.GetString(Encoding.UTF8.GetBytes(linkedInApplicationConfig.redirect_url));
+
+            var path = $"authorization?response_type=code&" +
+                       $"state={Guid.NewGuid()}&" +
+                       $"scope=email,openid,profile,w_member_social&" +
+                       $"client_id={linkedInApplicationConfig.client_id}&" +
+                       $"redirect_uri={encoded_url}&" +
+                       $"response_mode=form_post";
+            var content = await _httpClientUtilities.GetStringAsync(linkedInApplicationConfig.linkedin_baseurl, path);
+            return new ProConnectResponse<Content> { body = new Content { htmlcontent = content } };
         }
     }
 }

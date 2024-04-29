@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ProConnect.Infrastructure.Repository
@@ -402,6 +403,40 @@ namespace ProConnect.Infrastructure.Repository
                 _logger.LogError($"Failed to post data to: '{url}' , exception: '{ex}'");
                 throw;
             }
+        }
+
+        public async Task<string> GetStringAsync(string baseUrl, string path, string authorizationToken = null, Dictionary<string, string> headers = null)
+        {
+            TimeSpan defaultTimeoutValue = TimeSpan.FromSeconds(100);
+
+            string url = GetFullPath(baseUrl, path);
+            var httpClient = _factory.CreateClient();
+            httpClient.Timeout = defaultTimeoutValue;
+
+            if (!string.IsNullOrEmpty(authorizationToken))
+            {
+                this.AddAuthorizationHeader(httpClient, authorizationToken);
+            }
+
+            if (headers != null)
+            {
+                foreach (var pair in headers)
+                {
+                    this.AddHttpHeader(httpClient, pair.Key, pair.Value);
+                }
+            }
+
+            _logger.LogDebug($"Executing get request to: '{url}'");
+            var response = await httpClient.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            string responseBody = await response.Content.ReadAsStringAsync();
+
+            if (string.IsNullOrEmpty(responseBody))
+            {
+                return default;
+            }
+            return responseBody;
+
         }
     }
 }

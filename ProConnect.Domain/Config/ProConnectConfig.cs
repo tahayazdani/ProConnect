@@ -15,6 +15,7 @@ namespace ProConnect.Domain.Config
         public ProxyCurlConfig proxyCurlConfig { get; set; }
         public CacheConfig redisConfig { get; set; }
         public DataBaseConfig dataBaseConfig { get; set; }
+        public LinkedInApplicationConfig linkedInApplicationConfig { get; set; }
 
     }
 }
