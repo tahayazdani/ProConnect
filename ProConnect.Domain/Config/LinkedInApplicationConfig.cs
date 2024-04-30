@@ -16,5 +16,6 @@ namespace ProConnect.Domain.Config
         public string client_secret { get; set;}
         public string redirect_url { get; set; }
         public string linkedin_baseurl { get; set; }
+        public string linkedin_api_baseurl { get; set; }
     }
 }

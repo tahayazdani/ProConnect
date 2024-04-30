@@ -12,17 +12,17 @@ namespace ProConnect.WebApi.Controllers
     public class UserController : BaseController
     {
         protected readonly ILogger<UserController> _logger;
-        private readonly IUserService _user;
+        private readonly IUserService _userService;
         private readonly ProxyCurlConfig _proxyCurlConfig;
         private readonly LinkedInApplicationConfig _linkedInApplicationConfig;
 
         public UserController(ILogger<UserController> logger,
-                              IUserService user,
+                              IUserService userService,
                               IOptions<ProxyCurlConfig> proxyCurlConfig,
                               IOptions<LinkedInApplicationConfig> linkedInApplicationConfig)
         {
             _logger = logger;
-            _user = user;
+            _userService = userService;
             _proxyCurlConfig = proxyCurlConfig.Value;
             _linkedInApplicationConfig = linkedInApplicationConfig.Value;
         }
@@ -37,7 +37,7 @@ namespace ProConnect.WebApi.Controllers
         [Route("generateconsentlinkedinloginpage")]
         public async Task<IActionResult> GenerateConsentLinkedInLogInPage()
         {
-            var response = await _user.GenerateConsentLinkedInLogInPage(_linkedInApplicationConfig);
+            var response = await _userService.GenerateConsentLinkedInLogInPage(_linkedInApplicationConfig);
             return StatusCode(response.statuscode, response);
         }
 
@@ -52,9 +52,10 @@ namespace ProConnect.WebApi.Controllers
         /// <returns></returns>
         [HttpGet]
         [Route("authenticate")]
-        public IActionResult Authenticate(string code, string state)
+        public async Task<IActionResult> Authenticate(string code, string state)
         {
-            return Ok();
+            var response = await _userService.Authenticate(code, state, _linkedInApplicationConfig);
+            return StatusCode(response.statuscode, response);
         }
 
         [HttpPost]
@@ -80,7 +81,7 @@ namespace ProConnect.WebApi.Controllers
         [AllowAnonymous]
         public async Task<IActionResult> SignUp(SignUpRequest request)
         {
-            var response = await _user.SignUp(request, _proxyCurlConfig);
+            var response = await _userService.SignUp(request, _proxyCurlConfig);
             return StatusCode(response.statuscode, response);
         }
 
