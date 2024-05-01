@@ -16,5 +16,8 @@ namespace ProConnect.Domain.Config
         public string extra { get; set; }
         public string live_scrape { get; set; }
         public string skills { get; set; }
+        public string use_cache { get; set; }
+        public string fallback_to_cache { get; set; }
+        public string personal_email { get; set; }
     }
 }

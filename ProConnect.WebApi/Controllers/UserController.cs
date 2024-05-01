@@ -13,18 +13,15 @@ namespace ProConnect.WebApi.Controllers
     {
         protected readonly ILogger<UserController> _logger;
         private readonly IUserService _userService;
-        private readonly ProxyCurlConfig _proxyCurlConfig;
-        private readonly LinkedInApplicationConfig _linkedInApplicationConfig;
+        private readonly ProConnectConfig _proConnectConfig;
 
         public UserController(ILogger<UserController> logger,
                               IUserService userService,
-                              IOptions<ProxyCurlConfig> proxyCurlConfig,
-                              IOptions<LinkedInApplicationConfig> linkedInApplicationConfig)
+                              ProConnectConfig proConnectConfig)
         {
             _logger = logger;
             _userService = userService;
-            _proxyCurlConfig = proxyCurlConfig.Value;
-            _linkedInApplicationConfig = linkedInApplicationConfig.Value;
+            _proConnectConfig = proConnectConfig;
         }
 
 
@@ -37,7 +34,7 @@ namespace ProConnect.WebApi.Controllers
         [Route("generateconsentlinkedinloginpage")]
         public async Task<IActionResult> GenerateConsentLinkedInLogInPage()
         {
-            var response = await _userService.GenerateConsentLinkedInLogInPage(_linkedInApplicationConfig);
+            var response = await _userService.GenerateConsentLinkedInLogInPage();
             return StatusCode(response.statuscode, response);
         }
 
@@ -51,12 +48,21 @@ namespace ProConnect.WebApi.Controllers
         /// <param name="state"></param>
         /// <returns></returns>
         [HttpGet]
-        [Route("authenticate")]
-        public async Task<IActionResult> Authenticate(string code, string state)
+        [Route("linkedinauthentication")]
+        public async Task<IActionResult> LinkedInAuthentication(string code, string state)
         {
-            var response = await _userService.Authenticate(code, state, _linkedInApplicationConfig);
+            var response = await _userService.LinkedInAuthentication(code, state);
             return StatusCode(response.statuscode, response);
         }
+
+        [HttpGet]
+        [Route("systemauthentication")]
+        public async Task<IActionResult> SystemAuthentication()
+        {
+            var response = await _userService.SystemAuthentication();
+            return StatusCode(response.statuscode, response);
+        }
+
 
         [HttpPost]
         [Route("logout")]
@@ -81,7 +87,7 @@ namespace ProConnect.WebApi.Controllers
         [AllowAnonymous]
         public async Task<IActionResult> SignUp(SignUpRequest request)
         {
-            var response = await _userService.SignUp(request, _proxyCurlConfig);
+            var response = await _userService.SignUp(request);
             return StatusCode(response.statuscode, response);
         }
 

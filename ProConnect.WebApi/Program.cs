@@ -79,6 +79,7 @@ internal class Program
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
+        builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
 
         // register Redis
@@ -88,8 +89,7 @@ internal class Program
 
 
         // get application configuration
-        builder.Services.Configure<ProxyCurlConfig>(builder.Configuration.GetSection("proxycurlconfig"));
-        builder.Services.Configure<LinkedInApplicationConfig>(builder.Configuration.GetSection("LinkedInApplicationConfig"));
+        builder.Services.Configure<ProConnectConfig>(builder.Configuration.GetSection("ProConnectConfig"));
 
 
         var app = builder.Build();

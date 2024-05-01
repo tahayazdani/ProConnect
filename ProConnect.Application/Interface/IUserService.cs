@@ -11,9 +11,10 @@ namespace ProConnect.Application.Interface
 {
     public interface IUserService
     {
-        Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request, ProxyCurlConfig proxyCurlConfig);
-        Task<PersonProfileResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig);
-        Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage(LinkedInApplicationConfig linkedInApplicationConfig);
-        Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig);
+        Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request);
+        Task<PersonProfileResponse> GetPersonLinkedInProfile(string username);
+        Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage();
+        Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state);
+        Task<ProConnectResponse<SignInResponse>> SystemAuthentication();
     }
 }

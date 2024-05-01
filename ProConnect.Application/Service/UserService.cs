@@ -1,5 +1,6 @@
 ﻿using FluentValidation;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ProConnect.Application.Interface;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
@@ -20,21 +21,24 @@ namespace ProConnect.Application.Service
     {
         private readonly IUserRepository _userRepository;
         private readonly IHttpClientUtilities _httpClientUtilities;
+        private readonly ProConnectConfig _proConnectConfig;
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
                            ILogger<UserService> logger,
-                           Cache cache
+                           Cache cache,
+                           IOptions<ProConnectConfig> proConnectConfig
                            )
         {
             _userRepository = userRepository;
             _httpClientUtilities = httpClientUtilities;
             _logger = logger;
             _cache = cache;
+            _proConnectConfig = proConnectConfig.Value;
         }
-        public async Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request, ProxyCurlConfig proxyCurlConfig)
+        public async Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request)
         {
             var response = new ProConnectResponse<SignUpResponse>();
             var signUpResponse = new SignUpResponse();
@@ -47,7 +51,7 @@ namespace ProConnect.Application.Service
                 var cachekey = request.public_identifier;
                 var profileResponse = await _cache.Get(cachekey, async () =>
                 {
-                    var personProfile = await GetPersonLinkedInProfile(request.public_identifier, proxyCurlConfig);
+                    var personProfile = await GetPersonLinkedInProfile(request.public_identifier);
 
                     // set gender, date of birth and email address
                     personProfile.userid = Guid.NewGuid();
@@ -123,39 +127,48 @@ namespace ProConnect.Application.Service
 
             return response;
         }
-        public async Task<PersonProfileResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig)
+        public async Task<PersonProfileResponse> GetPersonLinkedInProfile(string username)
         {
             // call proxycurl endpoint to pull person info, then register into system
             // params : skills : included , extra : include , _live_scrape : force (no caching)
 
             var path = $"{username}";
-            if (!string.IsNullOrEmpty(proxyCurlConfig.extra))
-                path += $"&extra={proxyCurlConfig.extra}";
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.extra))
+                path += $"&extra={_proConnectConfig.proxyCurlConfig.extra}";
 
-            if (!string.IsNullOrEmpty(proxyCurlConfig.live_scrape))
-                path += $"&_live_scrape={proxyCurlConfig.live_scrape}";
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.live_scrape))
+                path += $"&_live_scrape={_proConnectConfig.proxyCurlConfig.live_scrape}";
 
-            if (!string.IsNullOrEmpty(proxyCurlConfig.skills))
-                path += $"&skills={proxyCurlConfig.skills}";
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.skills))
+                path += $"&skills={_proConnectConfig.proxyCurlConfig.skills}";
+
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.use_cache))
+                path += $"&use_cache={_proConnectConfig.proxyCurlConfig.use_cache}";
+
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.fallback_to_cache))
+                path += $"&fallback_to_cache={_proConnectConfig.proxyCurlConfig.fallback_to_cache}";
+
+            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.personal_email))
+                path += $"&personal_email={_proConnectConfig.proxyCurlConfig.personal_email}";
 
             // fetch profile form proxycurl
-            var personInfo = await _httpClientUtilities.GetAsync<PersonProfileResponse>(proxyCurlConfig.baseurl, path, proxyCurlConfig.authorizationtoken);
+            var personInfo = await _httpClientUtilities.GetAsync<PersonProfileResponse>(_proConnectConfig.proxyCurlConfig.baseurl, path, _proConnectConfig.proxyCurlConfig.authorizationtoken);
 
             return personInfo;
         }
-        public async Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage(LinkedInApplicationConfig linkedInApplicationConfig)
+        public async Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage()
         {
             try
             {
 
-                var encoded_url = HttpUtility.UrlEncode(linkedInApplicationConfig.redirect_url);
+                var encoded_url = HttpUtility.UrlEncode(_proConnectConfig.linkedInApplicationConfig.redirect_url);
                 var path = $"authorization?response_type=code&" +
                            $"state={Guid.NewGuid()}&" +
                            $"scope=profile,email,openid&" +
-                           $"client_id={linkedInApplicationConfig.client_id}&" +
+                           $"client_id={_proConnectConfig.linkedInApplicationConfig.client_id}&" +
                            $"redirect_uri={encoded_url}&" +
                            $"response_mode=form_post";
-                var content = await _httpClientUtilities.GetStringAsync(linkedInApplicationConfig.linkedin_baseurl, path);
+                var content = await _httpClientUtilities.GetStringAsync(_proConnectConfig.linkedInApplicationConfig.linkedin_baseurl, path);
                 return new ProConnectResponse<Content>
                 {
                     body = new Content { htmlcontent = content },
@@ -168,24 +181,24 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-        public async Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig)
+        public async Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state)
         {
             try
             {
                 // call accessToken endpoint to generate token
-                var tokenPath = $"{linkedInApplicationConfig.linkedin_baseurl}/accessToken?" +
+                var tokenPath = $"{_proConnectConfig.linkedInApplicationConfig.linkedin_baseurl}{_proConnectConfig.linkedInApplicationConfig.linkedin_accesstokenpath}?" +
                     $"grant_type=authorization_code&" +
                     $"code={code}&" +
-                    $"redirect_uri={HttpUtility.UrlEncode(linkedInApplicationConfig.redirect_url)}&" +
-                    $"client_id={linkedInApplicationConfig.client_id}&" +
-                    $"client_secret={linkedInApplicationConfig.client_secret}";
+                    $"redirect_uri={HttpUtility.UrlEncode(_proConnectConfig.linkedInApplicationConfig.redirect_url)}&" +
+                    $"client_id={_proConnectConfig.linkedInApplicationConfig.client_id}&" +
+                    $"client_secret={_proConnectConfig.linkedInApplicationConfig.client_secret}";
 
                 var tokenResponse = await _httpClientUtilities.PostAsync<TokenResponse>(tokenPath, new object { });
 
 
                 // call userinfo endpoint to pull user's lite profile
-                var userInfoPath = $"{linkedInApplicationConfig.linkedin_api_baseurl}";
-                var userInfoResponse = await _httpClientUtilities.GetAsync<SignInResponse>(userInfoPath, "/userinfo", tokenResponse.access_token);
+                var userInfoPath = $"{_proConnectConfig.linkedInApplicationConfig.linkedin_api_baseurl}";
+                var userInfoResponse = await _httpClientUtilities.GetAsync<SignInResponse>(userInfoPath, _proConnectConfig.linkedInApplicationConfig.linkedin_userinfopath, tokenResponse.access_token);
 
                 if (string.IsNullOrEmpty(userInfoResponse.sub))
                     return new ProConnectResponse<SignInResponse>
@@ -207,12 +220,16 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-        public async Task SystemAuthentication()
+        public async Task<ProConnectResponse<SignInResponse>> SystemAuthentication()
         {
-            // check user's email address in database see if the user is exist or not (registred)
-            // if the user is NOT exist then return a message
-            // if the user is exist but data expired then just call GetPersonLinkedInProfile endpoint to update db as well as redis
-            // if the user exist and data is NOT expired, then all good.
+            try
+            {
+                return new ProConnectResponse<SignInResponse> { };
+            }
+            catch (Exception)
+            {
+                throw;
+            }
         }
     }
 }
