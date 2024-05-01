@@ -14,6 +14,6 @@ namespace ProConnect.Application.Interface
         Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request, ProxyCurlConfig proxyCurlConfig);
         Task<PersonProfileResponse> GetPersonLinkedInProfile(string username, ProxyCurlConfig proxyCurlConfig);
         Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage(LinkedInApplicationConfig linkedInApplicationConfig);
-        Task<ProConnectResponse<SignInResponse>> Authenticate(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig);
+        Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig);
     }
 }

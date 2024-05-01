@@ -168,7 +168,7 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-        public async Task<ProConnectResponse<SignInResponse>> Authenticate(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig)
+        public async Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state, LinkedInApplicationConfig linkedInApplicationConfig)
         {
             try
             {
@@ -195,13 +195,6 @@ namespace ProConnect.Application.Service
                         message = "The user is not exist in LinkedIn."
                     };
 
-
-                // check user's email address in database see if the user is exist or not (registred)
-                // if the user is NOT exist then return a message
-                // if the user is exist but data expired then just call GetPersonLinkedInProfile endpoint to update db as well as redis
-                // if the user exist and data is NOT expired, then all good.
-
-
                 var response = new ProConnectResponse<SignInResponse>
                 {
                     body = userInfoResponse,
@@ -213,6 +206,13 @@ namespace ProConnect.Application.Service
             {
                 throw;
             }
+        }
+        public async Task SystemAuthentication()
+        {
+            // check user's email address in database see if the user is exist or not (registred)
+            // if the user is NOT exist then return a message
+            // if the user is exist but data expired then just call GetPersonLinkedInProfile endpoint to update db as well as redis
+            // if the user exist and data is NOT expired, then all good.
         }
     }
 }
