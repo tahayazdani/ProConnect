@@ -1,0 +1,9 @@
+version: '3.4'
+
+services:
+  proconnect.webapi:
+    image: ${DOCKER_REGISTRY-}proconnectwebapi
+    build:
+      context: .
+      dockerfile: ProConnect.WebApi/Dockerfile
+
