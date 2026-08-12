@@ -35,7 +35,6 @@ Cross-cutting conventions already established in the codebase — follow these f
 
 ## Known pre-existing issues (found along the way, not yet fixed)
 
-- [SignUpValidator.cs](ProConnect.Application/Validation/SignUpValidator.cs) throws an unhandled `NullReferenceException` (instead of a clean validation error) if `birth_date` is omitted from a signup request. Low-risk one-line null-check fix, deferred until asked for.
 - [appsettings.json](ProConnect.WebApi/appsettings.json) has real-looking secrets committed in plaintext (Redis password, LinkedIn `client_secret`, Proxycurl token). Should be rotated and moved to user-secrets/environment/vault — the new `JwtConfig:secret` was set up correctly via `dotnet user-secrets` as the model to follow.
 - Local `NuGet.Config` was added at the repo root, scoped to `nuget.org` only — the machine's global NuGet config points at internal/HTTP feeds (looks like a work environment leftover) that broke package restore for this project.
 
@@ -59,3 +58,13 @@ Full original plan detail (context, assumptions, verification approach) lives at
 ## Changelog
 
 - **2026-08-11** — Phase 0 + Phase 1 implemented and verified (build, auth-wall behavior, validation behavior). See "Known pre-existing issues" above for what was found but not fixed.
+- **2026-08-11** — Fixed the `SignUpValidator` `NullReferenceException` noted above: `ValidateBirthDate`/`IsAdult` now null-check `birth_date` and fail validation cleanly instead of crashing. Verified: a signup request without `birth_date` now returns a proper `INVALIDDATEFORMAT`/`NOTADULT` validation response instead of an unhandled exception.
+- **2026-08-11** — Full codebase null-reference audit (all 49 `.cs` files read). Found and fixed:
+  - `SignUpValidator`: `public_identifier` had no rule at all — a missing one made it all the way to the Redis cache-key hasher and threw `ArgumentNullException`. Added `NotEmpty()`.
+  - `UserService.SignUp`/`UpdateProfile`: a literal JSON `null` request body reaches the service layer as `null` — `ApiBehaviorOptions.SuppressModelStateInvalidFilter = true` (set in `Program.cs`) disables ASP.NET Core's automatic "non-nullable body is implicitly required" check, and there's no FluentValidation validator for `UpdateProfileRequest`, so nothing upstream catches it. Both methods now guard `request is null` and return a clean `ProConnectResponse` instead of crashing.
+  - `UserService.SignUp`: `GetPersonLinkedInProfile` (Proxycurl) can return `null` if the API responds with an empty body or JSON `null` on a 200 — guarded before use.
+  - `UserService.LinkedInAuthentication`: both the LinkedIn token-exchange response and the userinfo response can come back `null` the same way — guarded before dereferencing `.access_token`/`.sub`.
+  - `UserService.SystemAuthentication`/`GetProfile`/`UpdateProfile`: guarded the `IUserRepository.GetById`/`Update` "not found" case (returns `null`) — not reachable today since repos are stubbed with `NotImplementedException`, but this is the normal contract for a lookup-by-id method once a real database is wired in (Phase 8+), so guarding now avoids a latent NRE later.
+  - `TokenService`: constructor now throws a clear `InvalidOperationException` if `ProConnectConfig:JwtConfig` fails to bind, instead of a deferred NRE the first time a token is generated.
+  - Reviewed and ruled out as non-issues: `Cache`/`RedisCache`/`BaseCache` (struct-based `CacheItem<T>`, all `.Value` accesses already guarded by `Exists`/`foundInCache` checks), `HttpClientUtilities` (all optional params consistently null-checked before use), `BaseController.CurrentUserId` (always assigned before read), `DI.GetConfigValue` (only reachable at startup with already-valid config, not a live-request path).
+  - Verified via running API: missing `public_identifier` now returns a clean validation error; a literal `null` signup body now returns `"Request body is required."` instead of crashing.

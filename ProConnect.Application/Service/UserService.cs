@@ -47,6 +47,14 @@ namespace ProConnect.Application.Service
             var signUpResponse = new SignUpResponse();
             try
             {
+                if (request is null)
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Request body is required.",
+                        message = "Request body is required."
+                    };
+
                 // check in db , if the user is NOT exist
 
 
@@ -55,6 +63,9 @@ namespace ProConnect.Application.Service
                 var profileResponse = await _cache.Get(cachekey, async () =>
                 {
                     var personProfile = await GetPersonLinkedInProfile(request.public_identifier);
+
+                    if (personProfile is null)
+                        throw new InvalidOperationException($"LinkedIn profile could not be retrieved for '{request.public_identifier}'.");
 
                     // set gender, date of birth and email address
                     personProfile.userid = Guid.NewGuid();
@@ -201,12 +212,19 @@ namespace ProConnect.Application.Service
 
                 var tokenResponse = await _httpClientUtilities.PostAsync<TokenResponse>(tokenPath, new object { });
 
+                if (tokenResponse is null || string.IsNullOrEmpty(tokenResponse.access_token))
+                    return new ProConnectResponse<SignInResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Failed to obtain an access token from LinkedIn.",
+                        message = "Failed to obtain an access token from LinkedIn."
+                    };
 
                 // call userinfo endpoint to pull user's lite profile
                 var userInfoPath = $"{_proConnectConfig.linkedInApplicationConfig.linkedin_api_baseurl}";
                 var userInfoResponse = await _httpClientUtilities.GetAsync<SignInResponse>(userInfoPath, _proConnectConfig.linkedInApplicationConfig.linkedin_userinfopath, tokenResponse.access_token);
 
-                if (string.IsNullOrEmpty(userInfoResponse.sub))
+                if (userInfoResponse is null || string.IsNullOrEmpty(userInfoResponse.sub))
                     return new ProConnectResponse<SignInResponse>
                     {
                         issuccessfull = false,
@@ -244,6 +262,14 @@ namespace ProConnect.Application.Service
             {
                 var user = await _userRepository.GetById(userid);
 
+                if (user is null)
+                    return new ProConnectResponse<SignInResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "User not found.",
+                        message = "User not found."
+                    };
+
                 return new ProConnectResponse<SignInResponse>
                 {
                     body = new SignInResponse
@@ -270,6 +296,14 @@ namespace ProConnect.Application.Service
             {
                 var user = await _userRepository.GetById(userid);
 
+                if (user is null)
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "User not found.",
+                        message = "User not found."
+                    };
+
                 return new ProConnectResponse<SignUpResponse>
                 {
                     body = MapToSignUpResponse(user),
@@ -286,7 +320,23 @@ namespace ProConnect.Application.Service
         {
             try
             {
+                if (request is null)
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Request body is required.",
+                        message = "Request body is required."
+                    };
+
                 var user = await _userRepository.GetById(userid);
+
+                if (user is null)
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "User not found.",
+                        message = "User not found."
+                    };
 
                 user.first_name = request.first_name ?? user.first_name;
                 user.last_name = request.last_name ?? user.last_name;
@@ -300,6 +350,14 @@ namespace ProConnect.Application.Service
                 user.background_cover_image_url = request.background_cover_image_url ?? user.background_cover_image_url;
 
                 var updatedUser = await _userRepository.Update(user);
+
+                if (updatedUser is null)
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Failed to update the profile.",
+                        message = "Failed to update the profile."
+                    };
 
                 return new ProConnectResponse<SignUpResponse>
                 {

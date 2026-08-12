@@ -16,7 +16,8 @@ namespace ProConnect.Application.Service
 
         public TokenService(IOptions<ProConnectConfig> proConnectConfig)
         {
-            _jwtConfig = proConnectConfig.Value.jwtConfig;
+            _jwtConfig = proConnectConfig.Value?.jwtConfig
+                ?? throw new InvalidOperationException("ProConnectConfig:JwtConfig configuration section is missing.");
         }
 
         public string GenerateToken(Guid userid, string public_identifier, string email)
