@@ -15,6 +15,8 @@ namespace ProConnect.Application.Interface
         Task<PersonProfileResponse> GetPersonLinkedInProfile(string username);
         Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage();
         Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state);
-        Task<ProConnectResponse<SignInResponse>> SystemAuthentication();
+        Task<ProConnectResponse<SignInResponse>> SystemAuthentication(Guid userid);
+        Task<ProConnectResponse<SignUpResponse>> GetProfile(Guid userid);
+        Task<ProConnectResponse<SignUpResponse>> UpdateProfile(Guid userid, UpdateProfileRequest request);
     }
 }

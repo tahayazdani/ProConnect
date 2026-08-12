@@ -29,5 +29,6 @@ namespace ProConnect.Domain.Response
         public string state { get; set; }
         public string gender { get; set; }
         public date birth_date { get; set; }
+        public string token { get; set; }
     }
 }

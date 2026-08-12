@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using System;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 
 namespace ProConnect.WebApi.Controllers
 {
@@ -23,6 +25,20 @@ namespace ProConnect.WebApi.Controllers
                     _token = !string.IsNullOrEmpty(correlationToken.ToString()) ? correlationToken.ToString() : System.Guid.NewGuid().ToString();
                 }
                 return _token;
+            }
+        }
+
+        private Guid? _currentUserId = null;
+        public Guid CurrentUserId
+        {
+            get
+            {
+                if (_currentUserId == null)
+                {
+                    var claimValue = HttpContext.User?.FindFirst("userid")?.Value;
+                    _currentUserId = Guid.TryParse(claimValue, out var userId) ? userId : Guid.Empty;
+                }
+                return _currentUserId.Value;
             }
         }
     }

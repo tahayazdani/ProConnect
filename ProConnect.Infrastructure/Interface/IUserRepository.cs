@@ -11,5 +11,8 @@ namespace ProConnect.Infrastructure.Interface
     public interface IUserRepository
     {
         Task<SignUpResponse> SignUp(UserRequest request);
+        Task<UserRequest> GetById(Guid userid);
+        Task<UserRequest> GetBySub(string sub);
+        Task<UserRequest> Update(UserRequest request);
     }
 }

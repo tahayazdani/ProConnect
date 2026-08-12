@@ -32,6 +32,7 @@ namespace ProConnect.WebApi.Controllers
         /// <returns></returns>
         [HttpGet]
         [Route("generateconsentlinkedinloginpage")]
+        [AllowAnonymous]
         public async Task<IActionResult> GenerateConsentLinkedInLogInPage()
         {
             var response = await _userService.GenerateConsentLinkedInLogInPage();
@@ -49,17 +50,21 @@ namespace ProConnect.WebApi.Controllers
         /// <returns></returns>
         [HttpGet]
         [Route("linkedinauthentication")]
+        [AllowAnonymous]
         public async Task<IActionResult> LinkedInAuthentication(string code, string state)
         {
             var response = await _userService.LinkedInAuthentication(code, state);
             return StatusCode(response.statuscode, response);
         }
 
+        /// <summary>
+        /// Returns the profile of the currently authenticated user, validating the bearer token.
+        /// </summary>
         [HttpGet]
         [Route("systemauthentication")]
         public async Task<IActionResult> SystemAuthentication()
         {
-            var response = await _userService.SystemAuthentication();
+            var response = await _userService.SystemAuthentication(CurrentUserId);
             return StatusCode(response.statuscode, response);
         }
 
@@ -77,6 +82,7 @@ namespace ProConnect.WebApi.Controllers
 
         [HttpGet]
         [Route("linkedinsignup")]
+        [AllowAnonymous]
         public IActionResult LinkedInSignUp()
         {
             return Ok("https://www.linkedin.com/signup");
@@ -96,6 +102,7 @@ namespace ProConnect.WebApi.Controllers
         #region Monitoring
         [HttpGet]
         [Route("ping")]
+        [AllowAnonymous]
         public IActionResult Ping()
         {
             _logger.LogInformation("Ping request");

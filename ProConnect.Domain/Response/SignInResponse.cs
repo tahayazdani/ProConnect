@@ -21,6 +21,7 @@ namespace ProConnect.Domain.Response
         public string email { get; set; }
         public string picture { get; set; }
         public locale locale { get; set; }
+        public string token { get; set; }
     }
 
     public class locale

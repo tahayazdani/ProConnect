@@ -1,9 +1,12 @@
 using FluentValidation;
 using FluentValidation.AspNetCore;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using ProConnect.Application.ErrorHandler;
 using ProConnect.Application.Interface;
 using ProConnect.Application.Service;
@@ -19,6 +22,7 @@ using Serilog;
 using Serilog.Context;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Configuration;
+using System.Text;
 using System.Text.Json.Serialization;
 
 
@@ -78,6 +82,7 @@ internal class Program
         builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
+        builder.Services.AddSingleton<ITokenService, TokenService>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
@@ -90,6 +95,39 @@ internal class Program
 
         // get application configuration
         builder.Services.Configure<ProConnectConfig>(builder.Configuration.GetSection("ProConnectConfig"));
+
+        // register JWT authentication - builder.Configuration (not the ad hoc `configuration` above)
+        // is used here so that user-secrets/environment overrides for the signing key are honored
+        var jwtConfig = builder.Configuration.GetSection("ProConnectConfig:JwtConfig").Get<JwtConfig>()
+            ?? throw new InvalidOperationException("ProConnectConfig:JwtConfig configuration section is missing.");
+
+        builder.Services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+        })
+        .AddJwtBearer(options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidIssuer = jwtConfig.issuer,
+                ValidateAudience = true,
+                ValidAudience = jwtConfig.audience,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtConfig.secret)),
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.FromMinutes(1)
+            };
+        });
+
+        // every endpoint requires authentication unless explicitly marked [AllowAnonymous]
+        builder.Services.AddAuthorization(options =>
+        {
+            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build();
+        });
 
 
         var app = builder.Build();
@@ -111,6 +149,7 @@ internal class Program
                        .AllowCredentials()
                        .WithExposedHeaders("Set-Cookie")
                    );
+        app.UseAuthentication();
         app.UseAuthorization();
         app.UseCookiePolicy();
         app.MapControllers();

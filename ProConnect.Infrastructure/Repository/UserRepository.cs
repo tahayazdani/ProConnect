@@ -15,5 +15,20 @@ namespace ProConnect.Infrastructure.Repository
         {
             throw new NotImplementedException();
         }
+
+        public async Task<UserRequest> GetById(Guid userid)
+        {
+            throw new NotImplementedException();
+        }
+
+        public async Task<UserRequest> GetBySub(string sub)
+        {
+            throw new NotImplementedException();
+        }
+
+        public async Task<UserRequest> Update(UserRequest request)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

@@ -24,11 +24,13 @@ namespace ProConnect.Application.Service
         private readonly ProConnectConfig _proConnectConfig;
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
+        private readonly ITokenService _tokenService;
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
                            ILogger<UserService> logger,
                            Cache cache,
+                           ITokenService tokenService,
                            IOptions<ProConnectConfig> proConnectConfig
                            )
         {
@@ -36,6 +38,7 @@ namespace ProConnect.Application.Service
             _httpClientUtilities = httpClientUtilities;
             _logger = logger;
             _cache = cache;
+            _tokenService = tokenService;
             _proConnectConfig = proConnectConfig.Value;
         }
         public async Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request)
@@ -69,6 +72,8 @@ namespace ProConnect.Application.Service
                 var userrequest = new UserRequest
                 {
                     userid = profileResponse.userid,
+                    sub = request.sub,
+                    emailaddress = profileResponse.emailaddress,
                     background_cover_image_url = profileResponse.background_cover_image_url,
                     city = profileResponse.city,
                     country = profileResponse.country,
@@ -111,7 +116,8 @@ namespace ProConnect.Application.Service
                     summary = profileResponse.summary,
                     public_identifier = profileResponse.public_identifier,
                     birth_date = profileResponse.birth_date,
-                    gender = profileResponse.gender
+                    gender = profileResponse.gender,
+                    token = _tokenService.GenerateToken(profileResponse.userid, profileResponse.public_identifier, profileResponse.emailaddress)
                 };
 
                 response = new ProConnectResponse<SignUpResponse>
@@ -208,6 +214,18 @@ namespace ProConnect.Application.Service
                         message = "The user is not exist in LinkedIn."
                     };
 
+                // look up the local account tied to this LinkedIn user so we can issue our own session token
+                var existingUser = await _userRepository.GetBySub(userInfoResponse.sub);
+                if (existingUser is null)
+                    return new ProConnectResponse<SignInResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "The user has not signed up yet.",
+                        message = "The user has not signed up yet."
+                    };
+
+                userInfoResponse.token = _tokenService.GenerateToken(existingUser.userid, existingUser.public_identifier, existingUser.emailaddress);
+
                 var response = new ProConnectResponse<SignInResponse>
                 {
                     body = userInfoResponse,
@@ -220,16 +238,103 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-        public async Task<ProConnectResponse<SignInResponse>> SystemAuthentication()
+        public async Task<ProConnectResponse<SignInResponse>> SystemAuthentication(Guid userid)
         {
             try
             {
-                return new ProConnectResponse<SignInResponse> { };
+                var user = await _userRepository.GetById(userid);
+
+                return new ProConnectResponse<SignInResponse>
+                {
+                    body = new SignInResponse
+                    {
+                        sub = user.sub,
+                        email = user.emailaddress,
+                        name = user.full_name,
+                        given_name = user.first_name,
+                        family_name = user.last_name,
+                        picture = user.profile_pic_url
+                    },
+                    message = "User's info has been fetched successfully."
+                };
             }
             catch (Exception)
             {
                 throw;
             }
+        }
+
+        public async Task<ProConnectResponse<SignUpResponse>> GetProfile(Guid userid)
+        {
+            try
+            {
+                var user = await _userRepository.GetById(userid);
+
+                return new ProConnectResponse<SignUpResponse>
+                {
+                    body = MapToSignUpResponse(user),
+                    message = "Profile has been fetched successfully."
+                };
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<SignUpResponse>> UpdateProfile(Guid userid, UpdateProfileRequest request)
+        {
+            try
+            {
+                var user = await _userRepository.GetById(userid);
+
+                user.first_name = request.first_name ?? user.first_name;
+                user.last_name = request.last_name ?? user.last_name;
+                user.headline = request.headline ?? user.headline;
+                user.summary = request.summary ?? user.summary;
+                user.occupation = request.occupation ?? user.occupation;
+                user.city = request.city ?? user.city;
+                user.state = request.state ?? user.state;
+                user.country = request.country ?? user.country;
+                user.profile_pic_url = request.profile_pic_url ?? user.profile_pic_url;
+                user.background_cover_image_url = request.background_cover_image_url ?? user.background_cover_image_url;
+
+                var updatedUser = await _userRepository.Update(user);
+
+                return new ProConnectResponse<SignUpResponse>
+                {
+                    body = MapToSignUpResponse(updatedUser),
+                    message = "Profile has been updated successfully."
+                };
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+        }
+
+        private static SignUpResponse MapToSignUpResponse(UserRequest user)
+        {
+            return new SignUpResponse
+            {
+                userid = user.userid,
+                public_identifier = user.public_identifier,
+                profile_pic_url = user.profile_pic_url,
+                background_cover_image_url = user.background_cover_image_url,
+                first_name = user.first_name,
+                last_name = user.last_name,
+                full_name = user.full_name,
+                follower_count = user.follower_count,
+                occupation = user.occupation,
+                headline = user.headline,
+                summary = user.summary,
+                country = user.country,
+                country_full_name = user.country_full_name,
+                city = user.city,
+                state = user.state,
+                gender = user.gender,
+                birth_date = user.birth_date
+            };
         }
     }
 }

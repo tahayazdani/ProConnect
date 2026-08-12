@@ -14,6 +14,8 @@ namespace ProConnect.Domain.Request
             
         }
         public Guid userid { get; set; }
+        public string sub { get; set; }
+        public string emailaddress { get; set; }
         public string public_identifier { get; set; }
         public string profile_pic_url { get; set; }
         public string background_cover_image_url { get; set; }
