@@ -76,7 +76,7 @@ namespace ProConnect.Application.Service
                                                personProfile.birth_date;
 
                     return personProfile;
-                }, CacheRegion.PERSONPROFILE);
+                }, CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
 
                 // save to database
                 // user
@@ -100,7 +100,10 @@ namespace ProConnect.Application.Service
                     summary = profileResponse.summary,
                     public_identifier = profileResponse.public_identifier,
                     birth_date = profileResponse.birth_date,
-                    gender = profileResponse.gender
+                    gender = profileResponse.gender,
+                    industry = profileResponse.industry,
+                    interests = profileResponse.interests,
+                    company = profileResponse.experiences?.FirstOrDefault()?.company
                 };
                 signUpResponse = await _userRepository.SignUp(userrequest);
 

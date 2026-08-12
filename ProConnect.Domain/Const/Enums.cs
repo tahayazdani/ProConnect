@@ -25,4 +25,10 @@ namespace ProConnect.Domain.Const
 
         SYSTEM = 500
     }
+
+    public enum SwipeAction
+    {
+        Like,
+        Pass
+    }
 }

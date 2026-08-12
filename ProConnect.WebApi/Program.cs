@@ -83,6 +83,9 @@ internal class Program
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
         builder.Services.AddSingleton<ITokenService, TokenService>();
+        builder.Services.AddSingleton<IMatchService, MatchService>();
+        builder.Services.AddSingleton<IMatchCriteriaRepository, MatchCriteriaRepository>();
+        builder.Services.AddSingleton<IMatchRepository, MatchRepository>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 

@@ -32,5 +32,8 @@ namespace ProConnect.Domain.Request
         public string state { get; set; }
         public string gender { get; set; }
         public date birth_date { get; set; }
+        public string industry { get; set; }
+        public string company { get; set; }
+        public string[] interests { get; set; }
     }
 }

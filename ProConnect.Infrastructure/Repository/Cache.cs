@@ -26,7 +26,12 @@ namespace ProConnect.Infrastructure.Repository
             _config = config;
         }
 
-        public async Task<T> Get<T>(string key, Func<Task<T>> getFromOrigin, string region = null) where T : class, new()
+        /// <summary>
+        /// `expiry` overrides the configured default TTL for this call only - pass a region-appropriate
+        /// value from a caller (e.g. short for volatile data like search/recommendations, longer for
+        /// rarely-changing data) instead of relying on the single global CacheAsideConfig timeout.
+        /// </summary>
+        public async Task<T> Get<T>(string key, Func<Task<T>> getFromOrigin, string region = null, TimeSpan? expiry = null) where T : class, new()
         {
             try
             {
@@ -57,7 +62,7 @@ namespace ProConnect.Infrastructure.Repository
                         data = await getFromOrigin();
                         if (data != null)
                         {
-                            await Set(key: key, data: data, region: region);
+                            await Set(key: key, data: data, region: region, expiry: expiry);
                         }
                     }
                     catch (Exception ex)
@@ -111,25 +116,28 @@ namespace ProConnect.Infrastructure.Repository
             }
         }
 
-        public async Task Set<T>(string key, T data, string region = null)
+        public async Task Set<T>(string key, T data, string region = null, TimeSpan? expiry = null)
         {
             try
             {
                 if (_config.enablecacheaside && data != null)
                 {
+                    // `expiry`, when given, overrides both the soft (re-fetch-from-origin) and hard
+                    // (Redis TTL) expiry for this call - otherwise both fall back to the configured default.
+                    var cacheAsideExpires = expiry ?? TimeSpan.FromSeconds(_config.cacheasidetimeout);
+
                     // Defines when to retrieve data from the origin assuming the origin is available
-                    var expiresOn = DateTime.UtcNow + TimeSpan.FromSeconds(_config.timeout);
+                    var expiresOn = DateTime.UtcNow + (expiry ?? TimeSpan.FromSeconds(_config.timeout));
                     var cacheItem = new CacheItem<T>
                     {
                         ExpiresOn = expiresOn,
                         Value = data,
                         Key = key,
                         Region = region,
-                        Ttl = _config.cacheasidetimeout
+                        Ttl = cacheAsideExpires.TotalSeconds
                     };
 
-                    // Defines when to remove data from cache permanently 
-                    var cacheAsideExpires = TimeSpan.FromSeconds(_config.cacheasidetimeout);
+                    // Defines when to remove data from cache permanently
                     await _cache.Set(key: key, cacheItem, region: region, cacheAsideExpires);
                 }
             }
