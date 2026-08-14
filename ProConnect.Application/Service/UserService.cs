@@ -147,22 +147,6 @@ namespace ProConnect.Application.Service
 
             return response;
         }
-        /// <summary>
-        /// Internal helper shared by SignUp and GetLinkedInProfile - not part of IUserService since nothing
-        /// outside this class needs it. Cache-aside, keyed by LinkedIn public identifier, so a profile
-        /// scraped once (from either entry point) isn't paid for again on every subsequent lookup.
-        /// Cache.Get only caches non-null results, so a not-found identifier isn't cached and will retry
-        /// against the live API on the next call - acceptable, since we don't want to permanently cache a
-        /// failure that might just be transient.
-        /// </summary>
-        private async Task<PersonProfileResponse> FetchLinkedInProfile(string publicIdentifier)
-        {
-            if (string.IsNullOrEmpty(publicIdentifier))
-                return null;
-
-            return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
-        }
-
         public async Task<ProConnectResponse<PersonProfileResponse>> GetLinkedInProfile(string publicIdentifier)
         {
             try
@@ -196,7 +180,6 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-
         public async Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage()
         {
             try
@@ -313,7 +296,6 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-
         public async Task<ProConnectResponse<SignUpResponse>> GetProfile(Guid userid)
         {
             try
@@ -339,7 +321,6 @@ namespace ProConnect.Application.Service
                 throw;
             }
         }
-
         public async Task<ProConnectResponse<SignUpResponse>> UpdateProfile(Guid userid, UpdateProfileRequest request)
         {
             try
@@ -395,6 +376,7 @@ namespace ProConnect.Application.Service
             }
         }
 
+
         private static SignUpResponse MapToSignUpResponse(UserRequest user)
         {
             return new SignUpResponse
@@ -417,6 +399,21 @@ namespace ProConnect.Application.Service
                 gender = user.gender,
                 birth_date = user.birth_date
             };
+        }
+        /// <summary>
+        /// Internal helper shared by SignUp and GetLinkedInProfile - not part of IUserService since nothing
+        /// outside this class needs it. Cache-aside, keyed by LinkedIn public identifier, so a profile
+        /// scraped once (from either entry point) isn't paid for again on every subsequent lookup.
+        /// Cache.Get only caches non-null results, so a not-found identifier isn't cached and will retry
+        /// against the live API on the next call - acceptable, since we don't want to permanently cache a
+        /// failure that might just be transient.
+        /// </summary>
+        private async Task<PersonProfileResponse> FetchLinkedInProfile(string publicIdentifier)
+        {
+            if (string.IsNullOrEmpty(publicIdentifier))
+                return null;
+
+            return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
         }
     }
 }
