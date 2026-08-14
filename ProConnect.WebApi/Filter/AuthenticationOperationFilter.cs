@@ -13,10 +13,15 @@ namespace ProConnect.WebApi.Filter
     {
         public void Apply(OpenApiOperation operation, OperationFilterContext context)
         {
-            var isAuthorized = context.MethodInfo.GetCustomAttributes(true).OfType<AuthorizeAttribute>().Any();
-            var allowAnonymous = context.MethodInfo.GetCustomAttributes(true).OfType<AllowAnonymousAttribute>().Any(); 
+            // Program.cs enforces auth via a global fallback policy (RequireAuthenticatedUser), not
+            // per-endpoint [Authorize] attributes - every endpoint is protected unless explicitly
+            // [AllowAnonymous]. This filter has to mirror that same default, or Swagger UI won't know
+            // to attach the bearer token to "protected" endpoints that never carry an [Authorize]
+            // attribute, and "Try it out" calls silently go out with no Authorization header at all.
+            var allowAnonymous = context.MethodInfo.GetCustomAttributes(true).OfType<AllowAnonymousAttribute>().Any()
+                || context.MethodInfo.DeclaringType.GetCustomAttributes(true).OfType<AllowAnonymousAttribute>().Any();
 
-            if (isAuthorized && !allowAnonymous)
+            if (!allowAnonymous)
             {
                 if (operation.Security == null)
                     operation.Security = new List<OpenApiSecurityRequirement>();

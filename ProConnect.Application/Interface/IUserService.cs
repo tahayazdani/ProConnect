@@ -12,7 +12,7 @@ namespace ProConnect.Application.Interface
     public interface IUserService
     {
         Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request);
-        Task<PersonProfileResponse> GetPersonLinkedInProfile(string username);
+        Task<ProConnectResponse<PersonProfileResponse>> GetLinkedInProfile(string publicIdentifier);
         Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage();
         Task<ProConnectResponse<SignInResponse>> LinkedInAuthentication(string code, string state);
         Task<ProConnectResponse<SignInResponse>> SystemAuthentication(Guid userid);

@@ -12,7 +12,7 @@ namespace ProConnect.Domain.Config
         {
 
         }
-        public ProxyCurlConfig proxyCurlConfig { get; set; }
+        public HarvestApiConfig harvestApiConfig { get; set; }
         public LinkedInApplicationConfig linkedInApplicationConfig { get; set; }
         public JwtConfig jwtConfig { get; set; }
 

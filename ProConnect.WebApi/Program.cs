@@ -14,6 +14,7 @@ using ProConnect.Application.Validation;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Request;
 using ProConnect.Infrastructure.Interface;
+using ProConnect.Infrastructure.Provider;
 using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.DI;
 using ProConnect.WebApi.Filter;
@@ -80,6 +81,7 @@ internal class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
+        builder.Services.AddSingleton<IProfileProvider, HarvestApiProfileProvider>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
         builder.Services.AddSingleton<ITokenService, TokenService>();

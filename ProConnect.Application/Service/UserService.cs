@@ -21,6 +21,7 @@ namespace ProConnect.Application.Service
     {
         private readonly IUserRepository _userRepository;
         private readonly IHttpClientUtilities _httpClientUtilities;
+        private readonly IProfileProvider _profileProvider;
         private readonly ProConnectConfig _proConnectConfig;
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
@@ -28,6 +29,7 @@ namespace ProConnect.Application.Service
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
+                           IProfileProvider profileProvider,
                            ILogger<UserService> logger,
                            Cache cache,
                            ITokenService tokenService,
@@ -36,6 +38,7 @@ namespace ProConnect.Application.Service
         {
             _userRepository = userRepository;
             _httpClientUtilities = httpClientUtilities;
+            _profileProvider = profileProvider;
             _logger = logger;
             _cache = cache;
             _tokenService = tokenService;
@@ -58,25 +61,22 @@ namespace ProConnect.Application.Service
                 // check in db , if the user is NOT exist
 
 
-                // call proxycurl to fetch person linkedIn info
-                var cachekey = request.public_identifier;
-                var profileResponse = await _cache.Get(cachekey, async () =>
-                {
-                    var personProfile = await GetPersonLinkedInProfile(request.public_identifier);
+                // FetchLinkedInProfile caches the raw scrape result itself, so repeat signups (or a
+                // GetLinkedInProfile lookup) for the same identifier don't hit the paid scraper API again
+                var profileResponse = await FetchLinkedInProfile(request.public_identifier);
 
-                    if (personProfile is null)
-                        throw new InvalidOperationException($"LinkedIn profile could not be retrieved for '{request.public_identifier}'.");
+                if (profileResponse is null)
+                    throw new InvalidOperationException($"LinkedIn profile could not be retrieved for '{request.public_identifier}'.");
 
-                    // set gender, date of birth and email address
-                    personProfile.userid = Guid.NewGuid();
-                    personProfile.emailaddress = string.IsNullOrEmpty(personProfile.emailaddress) ? request.email : personProfile.emailaddress;
-                    personProfile.gender = string.IsNullOrEmpty(personProfile.gender) ? request.gender : personProfile.gender;
-                    personProfile.birth_date = personProfile.birth_date is null ?
-                                               new date { day = request.birth_date.day, month = request.birth_date.month, year = request.birth_date.year } :
-                                               personProfile.birth_date;
-
-                    return personProfile;
-                }, CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
+                // set gender, date of birth and email address - applied on every call, not cached, so a
+                // later signup for the same identifier with different request data isn't silently stuck
+                // with whichever request happened to populate the cache first
+                profileResponse.userid = Guid.NewGuid();
+                profileResponse.emailaddress = string.IsNullOrEmpty(profileResponse.emailaddress) ? request.email : profileResponse.emailaddress;
+                profileResponse.gender = string.IsNullOrEmpty(profileResponse.gender) ? request.gender : profileResponse.gender;
+                profileResponse.birth_date = profileResponse.birth_date is null ?
+                                           new date { day = request.birth_date.day, month = request.birth_date.month, year = request.birth_date.year } :
+                                           profileResponse.birth_date;
 
                 // save to database
                 // user
@@ -147,35 +147,56 @@ namespace ProConnect.Application.Service
 
             return response;
         }
-        public async Task<PersonProfileResponse> GetPersonLinkedInProfile(string username)
+        /// <summary>
+        /// Internal helper shared by SignUp and GetLinkedInProfile - not part of IUserService since nothing
+        /// outside this class needs it. Cache-aside, keyed by LinkedIn public identifier, so a profile
+        /// scraped once (from either entry point) isn't paid for again on every subsequent lookup.
+        /// Cache.Get only caches non-null results, so a not-found identifier isn't cached and will retry
+        /// against the live API on the next call - acceptable, since we don't want to permanently cache a
+        /// failure that might just be transient.
+        /// </summary>
+        private async Task<PersonProfileResponse> FetchLinkedInProfile(string publicIdentifier)
         {
-            // call proxycurl endpoint to pull person info, then register into system
-            // params : skills : included , extra : include , _live_scrape : force (no caching)
+            if (string.IsNullOrEmpty(publicIdentifier))
+                return null;
 
-            var path = $"{username}";
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.extra))
-                path += $"&extra={_proConnectConfig.proxyCurlConfig.extra}";
-
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.live_scrape))
-                path += $"&_live_scrape={_proConnectConfig.proxyCurlConfig.live_scrape}";
-
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.skills))
-                path += $"&skills={_proConnectConfig.proxyCurlConfig.skills}";
-
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.use_cache))
-                path += $"&use_cache={_proConnectConfig.proxyCurlConfig.use_cache}";
-
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.fallback_to_cache))
-                path += $"&fallback_to_cache={_proConnectConfig.proxyCurlConfig.fallback_to_cache}";
-
-            if (!string.IsNullOrEmpty(_proConnectConfig.proxyCurlConfig.personal_email))
-                path += $"&personal_email={_proConnectConfig.proxyCurlConfig.personal_email}";
-
-            // fetch profile form proxycurl
-            var personInfo = await _httpClientUtilities.GetAsync<PersonProfileResponse>(_proConnectConfig.proxyCurlConfig.baseurl, path, _proConnectConfig.proxyCurlConfig.authorizationtoken);
-
-            return personInfo;
+            return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
         }
+
+        public async Task<ProConnectResponse<PersonProfileResponse>> GetLinkedInProfile(string publicIdentifier)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(publicIdentifier))
+                    return new ProConnectResponse<PersonProfileResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "public_identifier is required.",
+                        message = "public_identifier is required."
+                    };
+
+                var profile = await FetchLinkedInProfile(publicIdentifier);
+
+                if (profile is null)
+                    return new ProConnectResponse<PersonProfileResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = $"LinkedIn profile could not be found for '{publicIdentifier}'.",
+                        message = $"LinkedIn profile could not be found for '{publicIdentifier}'."
+                    };
+
+                return new ProConnectResponse<PersonProfileResponse>
+                {
+                    body = profile,
+                    message = "Profile has been fetched successfully."
+                };
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+        }
+
         public async Task<ProConnectResponse<Content>> GenerateConsentLinkedInLogInPage()
         {
             try

@@ -99,6 +99,22 @@ namespace ProConnect.WebApi.Controllers
 
         #endregion
 
+        #region Profile
+
+        /// <summary>
+        /// Scrapes and returns a LinkedIn profile by public identifier, without signing anyone up.
+        /// Kept behind auth (no [AllowAnonymous]) since every call costs money against the scraper API.
+        /// </summary>
+        [HttpGet]
+        [Route("linkedinprofile")]
+        public async Task<IActionResult> GetLinkedInProfile(string publicIdentifier)
+        {
+            var response = await _userService.GetLinkedInProfile(publicIdentifier);
+            return StatusCode(response.statuscode, response);
+        }
+
+        #endregion
+
         #region Monitoring
         [HttpGet]
         [Route("ping")]
