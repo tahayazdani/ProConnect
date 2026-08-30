@@ -15,6 +15,8 @@ namespace ProConnect.Domain.Const
     {
         public const string PERSONPROFILE = "PersonProfile";
         public const string MATCHRECOMMENDATION = "MatchRecommendation";
+        public const string SEARCHRESULT = "SearchResult";
+        public const string GEOCODE = "Geocode";
     }
 
     /// <summary>
@@ -27,5 +29,14 @@ namespace ProConnect.Domain.Const
     {
         public static readonly TimeSpan PersonProfile = TimeSpan.FromDays(7);
         public static readonly TimeSpan MatchRecommendation = TimeSpan.FromMinutes(15);
+
+        // Search has no invalidation trigger (unlike MatchRecommendation, which is cleared on
+        // UpdateCriteria) - kept short purely on a time basis so results don't go stale.
+        public static readonly TimeSpan SearchResult = TimeSpan.FromMinutes(5);
+
+        // A given city/state/country combination's coordinates are effectively immutable, unlike
+        // per-user profile data - cached indefinitely (in practice) to stay well clear of Nominatim's
+        // ~1 req/sec usage policy on repeat lookups of common locations.
+        public static readonly TimeSpan Geocode = TimeSpan.FromDays(90);
     }
 }

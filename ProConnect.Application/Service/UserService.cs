@@ -22,6 +22,7 @@ namespace ProConnect.Application.Service
         private readonly IUserRepository _userRepository;
         private readonly IHttpClientUtilities _httpClientUtilities;
         private readonly IProfileProvider _profileProvider;
+        private readonly IGeocodingProvider _geocodingProvider;
         private readonly ProConnectConfig _proConnectConfig;
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
@@ -30,6 +31,7 @@ namespace ProConnect.Application.Service
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
                            IProfileProvider profileProvider,
+                           IGeocodingProvider geocodingProvider,
                            ILogger<UserService> logger,
                            Cache cache,
                            ITokenService tokenService,
@@ -39,6 +41,7 @@ namespace ProConnect.Application.Service
             _userRepository = userRepository;
             _httpClientUtilities = httpClientUtilities;
             _profileProvider = profileProvider;
+            _geocodingProvider = geocodingProvider;
             _logger = logger;
             _cache = cache;
             _tokenService = tokenService;
@@ -105,6 +108,9 @@ namespace ProConnect.Application.Service
                     interests = profileResponse.interests,
                     company = profileResponse.experiences?.FirstOrDefault()?.company
                 };
+
+                await PopulateCoordinates(userrequest);
+
                 signUpResponse = await _userRepository.SignUp(userrequest);
 
                 // experience
@@ -140,8 +146,9 @@ namespace ProConnect.Application.Service
                     message = "User has successfully signed up."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"SignUp failed for public_identifier '{request?.public_identifier}'.");
                 throw;
             }
 
@@ -175,8 +182,9 @@ namespace ProConnect.Application.Service
                     message = "Profile has been fetched successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"GetLinkedInProfile failed for public_identifier '{publicIdentifier}'.");
                 throw;
             }
         }
@@ -200,8 +208,9 @@ namespace ProConnect.Application.Service
                 };
 
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "GenerateConsentLinkedInLogInPage failed.");
                 throw;
             }
         }
@@ -239,8 +248,11 @@ namespace ProConnect.Application.Service
                         message = "The user is not exist in LinkedIn."
                     };
 
-                // look up the local account tied to this LinkedIn user so we can issue our own session token
-                var existingUser = await _userRepository.GetBySub(userInfoResponse.sub);
+                // look up the local account tied to this LinkedIn user so we can issue our own session token.
+                // Uses GetBySubForAuthentication (not GetBySub) because a deactivated account must still be
+                // found here - signing back in is what reactivates it (Instagram-style "welcome back"),
+                // rather than requiring a separate dedicated reactivate endpoint.
+                var existingUser = await _userRepository.GetBySubForAuthentication(userInfoResponse.sub);
                 if (existingUser is null)
                     return new ProConnectResponse<SignInResponse>
                     {
@@ -248,6 +260,12 @@ namespace ProConnect.Application.Service
                         errormessage = "The user has not signed up yet.",
                         message = "The user has not signed up yet."
                     };
+
+                if (!existingUser.is_active)
+                {
+                    await _userRepository.Reactivate(existingUser.userid);
+                    _logger.LogInformation($"Userid '{existingUser.userid}' signed back in and was reactivated (was previously deactivated).");
+                }
 
                 userInfoResponse.token = _tokenService.GenerateToken(existingUser.userid, existingUser.public_identifier, existingUser.emailaddress);
 
@@ -258,8 +276,9 @@ namespace ProConnect.Application.Service
                 };
                 return response;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, "LinkedInAuthentication failed.");
                 throw;
             }
         }
@@ -291,8 +310,9 @@ namespace ProConnect.Application.Service
                     message = "User's info has been fetched successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"SystemAuthentication failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -316,8 +336,9 @@ namespace ProConnect.Application.Service
                     message = "Profile has been fetched successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"GetProfile failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -343,6 +364,10 @@ namespace ProConnect.Application.Service
                         message = "User not found."
                     };
 
+                var locationChanged = (request.city != null && request.city != user.city)
+                    || (request.state != null && request.state != user.state)
+                    || (request.country != null && request.country != user.country);
+
                 user.first_name = request.first_name ?? user.first_name;
                 user.last_name = request.last_name ?? user.last_name;
                 user.headline = request.headline ?? user.headline;
@@ -353,6 +378,11 @@ namespace ProConnect.Application.Service
                 user.country = request.country ?? user.country;
                 user.profile_pic_url = request.profile_pic_url ?? user.profile_pic_url;
                 user.background_cover_image_url = request.background_cover_image_url ?? user.background_cover_image_url;
+
+                // only re-geocode when location text actually changed - avoids an unnecessary Nominatim
+                // round trip (even cached ones) on every profile edit
+                if (locationChanged)
+                    await PopulateCoordinates(user);
 
                 var updatedUser = await _userRepository.Update(user);
 
@@ -370,8 +400,77 @@ namespace ProConnect.Application.Service
                     message = "Profile has been updated successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"UpdateProfile failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Temporarily deactivates the caller's own account (is_active = false) - Instagram-style "take a
+        /// break", NOT a delete. Nothing is removed: matches/swipes/profile data all stay intact, just
+        /// invisible everywhere (GetById, GetBySub, match candidates, search - see
+        /// IUserRepository.Deactivate) until the user signs back in via LinkedIn, which automatically
+        /// reactivates them (see LinkedInAuthentication). Self-service only: there's no admin/role system
+        /// yet to support deactivating someone else's account. For permanent deletion, see DeleteAccount.
+        /// </summary>
+        public async Task<ProConnectResponse<string>> DeactivateAccount(Guid userid)
+        {
+            try
+            {
+                var deactivated = await _userRepository.Deactivate(userid);
+
+                if (!deactivated)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "User not found.",
+                        message = "User not found."
+                    };
+
+                return new ProConnectResponse<string>
+                {
+                    body = "Deactivated",
+                    message = "Account has been deactivated. Sign back in at any time to reactivate it."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"DeactivateAccount failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Permanently and irreversibly deletes the caller's own account and every piece of data that
+        /// references it (swipes, matches, match criteria - see IUserRepository.DeleteAccount). This is
+        /// NOT the same as DeactivateAccount above - there is no way back from this, unlike deactivation.
+        /// Self-service only, same limitation as DeactivateAccount.
+        /// </summary>
+        public async Task<ProConnectResponse<string>> DeleteAccount(Guid userid)
+        {
+            try
+            {
+                var deleted = await _userRepository.DeleteAccount(userid);
+
+                if (!deleted)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "User not found.",
+                        message = "User not found."
+                    };
+
+                return new ProConnectResponse<string>
+                {
+                    body = "Deleted",
+                    message = "Account and all associated data have been permanently deleted."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"DeleteAccount failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -414,6 +513,34 @@ namespace ProConnect.Application.Service
                 return null;
 
             return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
+        }
+
+        /// <summary>
+        /// Resolves user.city/state/country into user.latitude/user.longitude via IGeocodingProvider
+        /// (Nominatim) so radius-based match/search queries have a coordinate to work with. LinkedIn/harvestapi
+        /// never supplies lat/long directly. Best-effort: geocoding failures (bad/ambiguous location text,
+        /// Nominatim being unreachable, etc.) are logged and swallowed rather than propagated, since a signup
+        /// or profile update shouldn't fail just because the free geocoder had a bad day - the user simply
+        /// won't show up in radius searches until a later update re-triggers this.
+        /// </summary>
+        private async Task PopulateCoordinates(UserRequest user)
+        {
+            try
+            {
+                var coordinate = await _geocodingProvider.Geocode(user.city, user.state, user.country);
+                if (coordinate is null)
+                {
+                    _logger.LogDebug($"Could not resolve coordinates for user {user.userid} (city={user.city}, state={user.state}, country={user.country})");
+                    return;
+                }
+
+                user.latitude = coordinate.latitude;
+                user.longitude = coordinate.longitude;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Geocoding failed for user {user.userid} (city={user.city}, state={user.state}, country={user.country})");
+            }
         }
     }
 }

@@ -196,9 +196,10 @@ namespace ProConnect.Infrastructure.Repository
                 var result = await this.DeserializeJsonResponse<T>(response);
                 return result;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError($"Failed to post data to: '{url}' , exception: '{ex}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }
@@ -248,9 +249,10 @@ namespace ProConnect.Infrastructure.Repository
 
                 return responseBody;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError($"Failed to post data to: '{url}' , exception: '{ex}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }
@@ -281,9 +283,10 @@ namespace ProConnect.Infrastructure.Repository
                 var result = await this.DeserializeJsonResponse<T>(response);
                 return result;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError($"Failed to put data to: '{url}' , exception: '{ex}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }
@@ -308,9 +311,10 @@ namespace ProConnect.Infrastructure.Repository
                 _logger.LogDebug($"Executing delete request to: '{url}'");
                 object o = await httpClient.DeleteAsync(url);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError(ex, $"Failed to delete data from: '{url}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }
@@ -340,9 +344,10 @@ namespace ProConnect.Infrastructure.Repository
                 var result = await this.DeserializeJsonResponse<T>(response);
                 return result;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError($"Failed to post data to: '{url}' , exception: '{ex}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }
@@ -398,9 +403,10 @@ namespace ProConnect.Infrastructure.Repository
 
                 return default;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError($"Failed to post data to: '{url}' , exception: '{ex}'");
+                // Not logged here - infra propagates, the calling service layer logs with business
+                // context (which user/operation) before rethrowing. See PROJECT_NOTES.md "Logging".
                 throw;
             }
         }

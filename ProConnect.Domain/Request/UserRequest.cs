@@ -30,10 +30,19 @@ namespace ProConnect.Domain.Request
         public string country_full_name { get; set; }
         public string city { get; set; }
         public string state { get; set; }
+        // Geocoded from city/state/country via IGeocodingProvider at signup - LinkedIn/harvestapi provides
+        // no lat/long directly. Null when the location text couldn't be resolved to a coordinate.
+        public double? latitude { get; set; }
+        public double? longitude { get; set; }
         public string gender { get; set; }
         public date birth_date { get; set; }
         public string industry { get; set; }
         public string company { get; set; }
         public string[] interests { get; set; }
+        // Soft-delete/deactivation flag. New signups always start active (set explicitly in
+        // UserRepository regardless of whatever a caller passes in). Everywhere a user can be looked
+        // up or listed (GetById, GetBySub, match candidates, search) filters this to true - an
+        // inactive user should behave as if they don't exist to everyone, including themselves.
+        public bool is_active { get; set; } = true;
     }
 }

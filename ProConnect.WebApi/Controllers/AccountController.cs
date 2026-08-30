@@ -34,6 +34,31 @@ namespace ProConnect.WebApi.Controllers
             return StatusCode(response.statuscode, response);
         }
 
+        // Temporary, reversible deactivation (Instagram-style "take a break") - NOT a delete, nothing is
+        // removed. See IUserService.DeactivateAccount. Signing back in via LinkedIn reactivates the
+        // account automatically - there's no separate "reactivate" endpoint by design. Deliberately a
+        // dedicated action route (not DELETE on "profile") so it can't be confused with the real,
+        // permanent delete below.
+        [HttpPost]
+        [Route("deactivate")]
+        public async Task<IActionResult> DeactivateAccount()
+        {
+            var response = await _userService.DeactivateAccount(CurrentUserId);
+            return StatusCode(response.statuscode, response);
+        }
+
+        // Permanent, irreversible hard delete of the account and every piece of data tied to it (swipes,
+        // matches, match criteria) - NOT the same as DeactivateAccount above. See
+        // IUserService.DeleteAccount. HTTP DELETE on "profile" is intentional here - this is the one
+        // action that actually deletes the resource.
+        [HttpDelete]
+        [Route("profile")]
+        public async Task<IActionResult> DeleteAccount()
+        {
+            var response = await _userService.DeleteAccount(CurrentUserId);
+            return StatusCode(response.statuscode, response);
+        }
+
         #endregion
 
         #region Monitoring

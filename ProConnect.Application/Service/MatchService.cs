@@ -57,8 +57,9 @@ namespace ProConnect.Application.Service
                     message = "Match criteria have been fetched successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"GetCriteria failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -129,8 +130,9 @@ namespace ProConnect.Application.Service
                     message = "Match criteria have been updated successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"UpdateCriteria failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -172,8 +174,9 @@ namespace ProConnect.Application.Service
                     message = "Recommendations have been fetched successfully."
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"GetRecommendations failed for userid '{userid}'.");
                 throw;
             }
         }
@@ -229,8 +232,9 @@ namespace ProConnect.Application.Service
                     message = "It's a match!"
                 };
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _logger.LogError(ex, $"Swipe ({action}) failed for userid '{userid}' -> targetUserId '{targetUserId}'.");
                 throw;
             }
         }

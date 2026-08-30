@@ -8,5 +8,11 @@ namespace ProConnect.Domain.Config
 {
     public class DataBaseConfig
     {
+        public DataBaseConfig()
+        {
+
+        }
+
+        public string connectionstring { get; set; }
     }
 }

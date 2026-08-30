@@ -1,0 +1,35 @@
+# Local dev infrastructure for ProConnect (not the VS-generated webapi compose files).
+# Start with: docker compose -f docker-compose.db.yml up -d
+services:
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: proconnect-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: proconnect
+      POSTGRES_PASSWORD: proconnect_dev_local
+      POSTGRES_DB: proconnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - proconnect-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proconnect -d proconnect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: proconnect-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  proconnect-postgres-data:

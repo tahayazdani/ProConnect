@@ -15,6 +15,8 @@ namespace ProConnect.Domain.Config
         public HarvestApiConfig harvestApiConfig { get; set; }
         public LinkedInApplicationConfig linkedInApplicationConfig { get; set; }
         public JwtConfig jwtConfig { get; set; }
+        public DataBaseConfig dataBaseConfig { get; set; }
+        public GeocodingConfig geocodingConfig { get; set; }
 
     }
 }

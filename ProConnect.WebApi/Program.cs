@@ -11,9 +11,11 @@ using ProConnect.Application.ErrorHandler;
 using ProConnect.Application.Interface;
 using ProConnect.Application.Service;
 using ProConnect.Application.Validation;
+using Microsoft.EntityFrameworkCore;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Request;
 using ProConnect.Infrastructure.Interface;
+using ProConnect.Infrastructure.Persistence;
 using ProConnect.Infrastructure.Provider;
 using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.DI;
@@ -33,9 +35,13 @@ internal class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        // includes the environment-specific override file (e.g. appsettings.Development.json) so that
+        // CacheConfig/CacheAsideConfig - read from this ad hoc builder rather than builder.Configuration -
+        // also honor local/per-environment overrides (mirrors the JwtConfig comment further down).
         var configuration = new ConfigurationBuilder()
                .SetBasePath(Directory.GetCurrentDirectory())
                .AddJsonFile("appsettings.json")
+               .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true)
                .Build();
 
         //Add support to logging with SERILOG
@@ -82,14 +88,31 @@ internal class Program
         builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         builder.Services.AddSingleton<IHttpClientUtilities, HttpClientUtilities>();
         builder.Services.AddSingleton<IProfileProvider, HarvestApiProfileProvider>();
+        builder.Services.AddSingleton<IGeocodingProvider, NominatimGeocodingProvider>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
         builder.Services.AddSingleton<ITokenService, TokenService>();
         builder.Services.AddSingleton<IMatchService, MatchService>();
         builder.Services.AddSingleton<IMatchCriteriaRepository, MatchCriteriaRepository>();
         builder.Services.AddSingleton<IMatchRepository, MatchRepository>();
+        builder.Services.AddSingleton<ISearchService, SearchService>();
+        builder.Services.AddSingleton<ISearchRepository, SearchRepository>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
+        builder.Services.AddSingleton<IValidator<SearchRequest>, SearchRequestValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
+
+
+        // register database (Postgres/PostGIS via EF Core + Npgsql). A pooled factory (rather than
+        // AddDbContext, which registers a scoped DbContext) is used because the repositories above are
+        // singletons, matching the rest of this codebase's DI style - each repository method creates and
+        // disposes its own short-lived DbContext via IDbContextFactory<T> instead of holding one for the
+        // app's lifetime, which DbContext (not thread-safe) doesn't support.
+        var databaseConnectionString = builder.Configuration.GetSection("ProConnectConfig:DataBaseConfig:connectionstring").Value;
+        if (string.IsNullOrWhiteSpace(databaseConnectionString))
+            throw new InvalidOperationException("ProConnectConfig:DataBaseConfig:connectionstring configuration section is missing.");
+
+        builder.Services.AddPooledDbContextFactory<ProConnectDbContext>(options =>
+            options.UseNpgsql(databaseConnectionString, npgsqlOptions => npgsqlOptions.UseNetTopologySuite()));
 
 
         // register Redis
