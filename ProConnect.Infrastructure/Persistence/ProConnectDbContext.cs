@@ -21,9 +21,17 @@ namespace ProConnect.Infrastructure.Persistence
         public DbSet<MatchCriteriaEntity> MatchCriteria => Set<MatchCriteriaEntity>();
         public DbSet<SwipeEntity> Swipes => Set<SwipeEntity>();
         public DbSet<MatchEntity> Matches => Set<MatchEntity>();
+        public DbSet<BlockEntity> Blocks => Set<BlockEntity>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            // Backs the GIN trigram indexes in UserEntityConfiguration (full_name/headline/occupation/
+            // company/industry/city/state/country) - without pg_trgm, a leading-wildcard ILIKE
+            // ('%term%', as SearchRepository.Search uses) can't use a plain B-tree index at all and falls
+            // back to a full table scan. postgis is registered implicitly by npgsqlOptions.UseNetTopologySuite()
+            // (see Program.cs), but pg_trgm has no such auto-registration and needs this explicit call.
+            modelBuilder.HasPostgresExtension("pg_trgm");
+
             modelBuilder.ApplyConfigurationsFromAssembly(typeof(ProConnectDbContext).Assembly);
             base.OnModelCreating(modelBuilder);
         }

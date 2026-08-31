@@ -17,5 +17,6 @@ namespace ProConnect.Domain.Response
         public int? min_age { get; set; }
         public int? max_age { get; set; }
         public string[] interests { get; set; }
+        public double? radius_km { get; set; }
     }
 }

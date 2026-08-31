@@ -45,6 +45,7 @@ namespace ProConnect.Infrastructure.Repository
             entity.min_age = criteria.min_age;
             entity.max_age = criteria.max_age;
             entity.interests = criteria.interests;
+            entity.radius_km = criteria.radius_km;
 
             await db.SaveChangesAsync();
 
@@ -60,7 +61,8 @@ namespace ProConnect.Infrastructure.Repository
             industry = entity.industry,
             min_age = entity.min_age,
             max_age = entity.max_age,
-            interests = entity.interests
+            interests = entity.interests,
+            radius_km = entity.radius_km
         };
     }
 }

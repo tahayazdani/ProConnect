@@ -17,6 +17,12 @@ namespace ProConnect.Domain.Const
         public const string MATCHRECOMMENDATION = "MatchRecommendation";
         public const string SEARCHRESULT = "SearchResult";
         public const string GEOCODE = "Geocode";
+
+        // Internal ProConnect.Domain.Request.UserRequest record (UserRepository.GetById), NOT the scraped
+        // LinkedIn PersonProfileResponse - see CacheRegion.PERSONPROFILE for that. Hit on every match/search
+        // request that resolves effective criteria, so it needs its own short-TTL region rather than
+        // sharing PersonProfile's 7-day TTL (this data changes far more often - profile edits, deactivation).
+        public const string USERPROFILE = "UserProfile";
     }
 
     /// <summary>
@@ -38,5 +44,12 @@ namespace ProConnect.Domain.Const
         // per-user profile data - cached indefinitely (in practice) to stay well clear of Nominatim's
         // ~1 req/sec usage policy on repeat lookups of common locations.
         public static readonly TimeSpan Geocode = TimeSpan.FromDays(90);
+
+        // Short relative to PersonProfile (7 days) since this mirrors our own mutable UserEntity row
+        // (profile edits, deactivation) rather than a rarely-changing LinkedIn scrape - long enough to
+        // absorb the hot-path GetById calls from MatchService.ResolveEffectiveCriteria on every
+        // swipe/recommendation/search request, short enough that a profile edit or deactivation is
+        // reflected soon even though UserRepository also actively invalidates this on every write.
+        public static readonly TimeSpan UserProfile = TimeSpan.FromMinutes(10);
     }
 }

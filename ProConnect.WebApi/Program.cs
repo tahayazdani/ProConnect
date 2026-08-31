@@ -99,6 +99,7 @@ internal class Program
         builder.Services.AddSingleton<ISearchRepository, SearchRepository>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
         builder.Services.AddSingleton<IValidator<SearchRequest>, SearchRequestValidator>();
+        builder.Services.AddSingleton<IValidator<MatchCandidatePageRequest>, MatchCandidatePageRequestValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
 
@@ -107,9 +108,24 @@ internal class Program
         // singletons, matching the rest of this codebase's DI style - each repository method creates and
         // disposes its own short-lived DbContext via IDbContextFactory<T> instead of holding one for the
         // app's lifetime, which DbContext (not thread-safe) doesn't support.
-        var databaseConnectionString = builder.Configuration.GetSection("ProConnectConfig:DataBaseConfig:connectionstring").Value;
-        if (string.IsNullOrWhiteSpace(databaseConnectionString))
+        var dataBaseConfig = builder.Configuration.GetSection("ProConnectConfig:DataBaseConfig").Get<DataBaseConfig>();
+        if (string.IsNullOrWhiteSpace(dataBaseConfig?.connectionstring))
             throw new InvalidOperationException("ProConnectConfig:DataBaseConfig:connectionstring configuration section is missing.");
+
+        // Explicit pool sizing rather than relying on Npgsql's built-in defaults (Min Pool Size=0, Max
+        // Pool Size=100) - at higher instance counts/QPS the default max becomes the limiting factor
+        // long before Postgres itself does, and a silent default is easy to forget is even a knob. Only
+        // applied when the connection string itself doesn't already specify a value, so an
+        // environment-specific override always wins.
+        var connectionStringBuilder = new Npgsql.NpgsqlConnectionStringBuilder(dataBaseConfig.connectionstring);
+        if (!connectionStringBuilder.Pooling.Equals(false))
+        {
+            connectionStringBuilder.Pooling = true;
+            connectionStringBuilder.MinPoolSize = dataBaseConfig.minpoolsize ?? connectionStringBuilder.MinPoolSize;
+            connectionStringBuilder.MaxPoolSize = dataBaseConfig.maxpoolsize ?? Math.Max(connectionStringBuilder.MaxPoolSize, 100);
+            connectionStringBuilder.ConnectionIdleLifetime = dataBaseConfig.connectionidlelifetimeseconds ?? connectionStringBuilder.ConnectionIdleLifetime;
+        }
+        var databaseConnectionString = connectionStringBuilder.ConnectionString;
 
         builder.Services.AddPooledDbContextFactory<ProConnectDbContext>(options =>
             options.UseNpgsql(databaseConnectionString, npgsqlOptions => npgsqlOptions.UseNetTopologySuite()));

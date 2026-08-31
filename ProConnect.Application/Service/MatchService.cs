@@ -83,7 +83,10 @@ namespace ProConnect.Application.Service
                 industry = stored?.industry ?? profile?.industry,
                 interests = (stored?.interests is { Length: > 0 }) ? stored.interests : profile?.interests,
                 min_age = stored?.min_age,
-                max_age = stored?.max_age
+                max_age = stored?.max_age,
+                // no profile-based default, same reasoning as min_age/max_age - LinkedIn carries no
+                // "how far am I willing to travel" preference.
+                radius_km = stored?.radius_km
             };
         }
 
@@ -107,6 +110,14 @@ namespace ProConnect.Application.Service
                         message = "min_age cannot be greater than max_age."
                     };
 
+                if (request.radius_km.HasValue && request.radius_km.Value <= 0)
+                    return new ProConnectResponse<MatchCriteriaResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "radius_km must be greater than zero.",
+                        message = "radius_km must be greater than zero."
+                    };
+
                 var criteria = new MatchCriteria
                 {
                     userid = userid,
@@ -116,7 +127,8 @@ namespace ProConnect.Application.Service
                     industry = request.industry,
                     min_age = request.min_age,
                     max_age = request.max_age,
-                    interests = request.interests
+                    interests = request.interests,
+                    radius_km = request.radius_km
                 };
 
                 await _matchCriteriaRepository.Upsert(criteria);
@@ -137,40 +149,51 @@ namespace ProConnect.Application.Service
             }
         }
 
-        public async Task<ProConnectResponse<List<MatchCandidateResponse>>> GetRecommendations(Guid userid)
+        // How many DB rows a single GetCandidates fetch pulls at a time. Deliberately much bigger than any
+        // realistic pagesize (max 50, see MatchCandidatePageRequestValidator) so most sessions never need a
+        // second DB round trip at all.
+        private const int RecommendationBatchFetchSize = 100;
+
+        // Once fewer than this many unseen items are left in the cached batch, kick off a background
+        // refill so the batch never actually runs dry while a user is still swiping through it - see
+        // TriggerBackgroundRefill.
+        private const int RecommendationRefillThreshold = 20;
+
+        public async Task<ProConnectResponse<MatchCandidatePageResponse>> GetRecommendations(Guid userid, MatchCandidatePageRequest request)
         {
             try
             {
+                request ??= new MatchCandidatePageRequest();
                 var criteria = await ResolveEffectiveCriteria(userid);
 
-                var recommendations = await _cache.Get(RecommendationCacheKey(userid), async () =>
-                {
-                    var candidates = await _matchRepository.GetCandidates(userid);
+                // refresh bypasses the cached batch entirely so the very next line rebuilds it from scratch
+                // instead of serving whatever's still sitting in Redis - see MatchCandidatePageRequest.refresh
+                // for when a client is expected to set this.
+                if (request.refresh)
+                    await _cache.Delete(RecommendationCacheKey(userid), CacheRegion.MATCHRECOMMENDATION);
 
-                    return (candidates ?? Enumerable.Empty<UserRequest>())
-                        .Where(c => c != null && c.userid != userid)
-                        .Where(c => IsWithinAgeRange(criteria, c))
-                        .Select(c => new MatchCandidateResponse
-                        {
-                            userid = c.userid,
-                            public_identifier = c.public_identifier,
-                            full_name = c.full_name,
-                            headline = c.headline,
-                            profile_pic_url = c.profile_pic_url,
-                            occupation = c.occupation,
-                            company = c.company,
-                            city = c.city,
-                            state = c.state,
-                            country = c.country,
-                            score = ScoreCandidate(criteria, c)
-                        })
-                        .OrderByDescending(c => c.score)
-                        .ToList();
-                }, CacheRegion.MATCHRECOMMENDATION, CacheExpiry.MatchRecommendation);
+                var neededThrough = request.page * request.pagesize;
 
-                return new ProConnectResponse<List<MatchCandidateResponse>>
+                var batch = await _cache.Get<MatchRecommendationBatch>(RecommendationCacheKey(userid), CacheRegion.MATCHRECOMMENDATION)
+                    ?? new MatchRecommendationBatch();
+
+                // Grow synchronously only if the page being asked for right now isn't covered yet (e.g. cold
+                // start, or a client jumping straight to a deep page) - this is the only path that can make
+                // a caller wait on GetCandidates; everything else is served from what's already cached.
+                if (batch.Items.Count < neededThrough && !batch.ExhaustedPool)
+                    batch = await GrowBatch(userid, criteria, batch);
+
+                var page = BuildPageFromBatch(batch, request);
+
+                // Proactively top up the cache once we're close to the end of what's cached, so the *next*
+                // page request almost never has to wait on GetCandidates itself - see TriggerBackgroundRefill.
+                var remainingAfterThisPage = batch.Items.Count - neededThrough;
+                if (!batch.ExhaustedPool && remainingAfterThisPage < RecommendationRefillThreshold)
+                    TriggerBackgroundRefill(userid, criteria, batch);
+
+                return new ProConnectResponse<MatchCandidatePageResponse>
                 {
-                    body = recommendations ?? new List<MatchCandidateResponse>(),
+                    body = page,
                     message = "Recommendations have been fetched successfully."
                 };
             }
@@ -179,6 +202,100 @@ namespace ProConnect.Application.Service
                 _logger.LogError(ex, $"GetRecommendations failed for userid '{userid}'.");
                 throw;
             }
+        }
+
+        // Pulls the next RecommendationBatchFetchSize rows starting at batch.NextOffset, appends them, and
+        // persists the grown batch back to Redis. TotalCount is refreshed on every grow so
+        // MatchCandidatePageResponse.total_count/has_more stay accurate as candidates come and go, without
+        // ever loading the full matching pool just to count it - see IMatchRepository.CountCandidates.
+        private async Task<MatchRecommendationBatch> GrowBatch(Guid userid, MatchCriteria criteria, MatchRecommendationBatch batch)
+        {
+            var fetched = (await _matchRepository.GetCandidates(userid, criteria, batch.NextOffset, RecommendationBatchFetchSize))?.ToList()
+                ?? new List<UserRequest>();
+
+            batch.Items.AddRange(fetched.Select(c => MapToCandidate(criteria, c)));
+            batch.NextOffset += fetched.Count;
+            batch.ExhaustedPool = fetched.Count < RecommendationBatchFetchSize;
+            batch.TotalCount = await _matchRepository.CountCandidates(userid, criteria);
+
+            await _cache.Set(RecommendationCacheKey(userid), batch, CacheRegion.MATCHRECOMMENDATION, CacheExpiry.MatchRecommendation);
+
+            return batch;
+        }
+
+        // Fire-and-forget: all Match/Cache services are registered Singleton (see Program.cs/DI.cs), so
+        // capturing them in a detached Task is safe - there's no scoped DbContext or request-lifetime
+        // dependency to be torn down out from under it. Runs GrowBatch against a snapshot of the batch that
+        // was already served to the caller; if two refills race, the loser's Set just overwrites with an
+        // equally-valid (slightly different offset ordering) grown batch - never a correctness issue, only
+        // a wasted DB call in the rare concurrent-request case.
+        private void TriggerBackgroundRefill(Guid userid, MatchCriteria criteria, MatchRecommendationBatch batch)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await GrowBatch(userid, criteria, batch);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"Background recommendation refill failed for userid '{userid}'.");
+                }
+            });
+        }
+
+        // Unlike ScoreCandidate (used by GetIncomingLikes/GetSeenProfiles), city/state/country/industry/age
+        // are no longer scored here - they're already hard-filtered in SQL by MatchRepository.GetCandidates,
+        // so every candidate in the batch already satisfies them. Only interests remain as a soft ranking
+        // signal, since there's no SQL-level interest filter.
+        private static MatchCandidateResponse MapToCandidate(MatchCriteria criteria, UserRequest candidate)
+        {
+            double score = 0;
+
+            if (criteria.interests != null && candidate.interests != null)
+            {
+                var sharedInterestCount = criteria.interests
+                    .Where(i => !string.IsNullOrEmpty(i))
+                    .Count(i => candidate.interests.Any(ci => string.Equals(ci, i, StringComparison.OrdinalIgnoreCase)));
+
+                score += Math.Min(sharedInterestCount * InterestMatchScore, MaxInterestScore);
+            }
+
+            return new MatchCandidateResponse
+            {
+                userid = candidate.userid,
+                public_identifier = candidate.public_identifier,
+                full_name = candidate.full_name,
+                headline = candidate.headline,
+                profile_pic_url = candidate.profile_pic_url,
+                occupation = candidate.occupation,
+                company = candidate.company,
+                city = candidate.city,
+                state = candidate.state,
+                country = candidate.country,
+                score = score
+            };
+        }
+
+        // Unlike BuildPage (which slices an already-fully-materialized list for GetIncomingLikes/
+        // GetSeenProfiles), this slices a bounded, incrementally-grown batch - total_count/has_more come
+        // from the batch's own TotalCount (refreshed on every GrowBatch call), not from all.Count, since the
+        // batch only ever holds a window into the full matching pool.
+        private static MatchCandidatePageResponse BuildPageFromBatch(MatchRecommendationBatch batch, MatchCandidatePageRequest request)
+        {
+            var items = batch.Items
+                .Skip((request.page - 1) * request.pagesize)
+                .Take(request.pagesize)
+                .ToList();
+
+            return new MatchCandidatePageResponse
+            {
+                results = items,
+                total_count = batch.TotalCount,
+                page = request.page,
+                pagesize = request.pagesize,
+                has_more = (long)request.page * request.pagesize < batch.TotalCount
+            };
         }
 
         public async Task<ProConnectResponse<SwipeResponse>> Like(Guid userid, Guid targetUserId)
@@ -239,6 +356,219 @@ namespace ProConnect.Application.Service
             }
         }
 
+        public async Task<ProConnectResponse<MatchSummaryPageResponse>> GetMatches(Guid userid, MatchCandidatePageRequest request)
+        {
+            try
+            {
+                request ??= new MatchCandidatePageRequest();
+
+                var offset = (request.page - 1) * request.pagesize;
+                var matches = await _matchRepository.GetMatches(userid, offset, request.pagesize);
+                var totalCount = await _matchRepository.CountMatches(userid);
+
+                var results = (matches ?? Enumerable.Empty<MatchSummary>())
+                    .Select(m => new MatchSummaryResponse
+                    {
+                        matchid = m.matchid,
+                        matched_at_utc = m.matched_at_utc,
+                        userid = m.userid,
+                        public_identifier = m.public_identifier,
+                        full_name = m.full_name,
+                        headline = m.headline,
+                        profile_pic_url = m.profile_pic_url,
+                        occupation = m.occupation,
+                        company = m.company,
+                        city = m.city,
+                        state = m.state,
+                        country = m.country
+                    })
+                    .ToList();
+
+                return new ProConnectResponse<MatchSummaryPageResponse>
+                {
+                    body = new MatchSummaryPageResponse
+                    {
+                        results = results,
+                        total_count = totalCount,
+                        page = request.page,
+                        pagesize = request.pagesize,
+                        has_more = (long)request.page * request.pagesize < totalCount
+                    },
+                    message = "Matches have been fetched successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"GetMatches failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> Unmatch(Guid userid, Guid matchId)
+        {
+            try
+            {
+                var unmatched = await _matchRepository.Unmatch(userid, matchId);
+                if (!unmatched)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Match not found.",
+                        message = "Match not found."
+                    };
+
+                _logger.LogInformation($"Userid '{userid}' unmatched matchid '{matchId}'.");
+
+                return new ProConnectResponse<string>
+                {
+                    body = "Unmatched",
+                    message = "You are no longer matched."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Unmatch failed for userid '{userid}' -> matchId '{matchId}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> BlockUser(Guid userid, Guid targetUserId)
+        {
+            try
+            {
+                if (targetUserId == Guid.Empty)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "A valid target user is required.",
+                        message = "A valid target user is required."
+                    };
+
+                if (targetUserId == userid)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "You cannot block yourself.",
+                        message = "You cannot block yourself."
+                    };
+
+                await _matchRepository.BlockUser(userid, targetUserId);
+
+                // blocking changes both sides' candidate pool immediately - drop any cached recommendations
+                // so neither party sees the other again before the cache would naturally expire
+                await _cache.Delete(RecommendationCacheKey(userid), CacheRegion.MATCHRECOMMENDATION);
+                await _cache.Delete(RecommendationCacheKey(targetUserId), CacheRegion.MATCHRECOMMENDATION);
+
+                _logger.LogInformation($"Userid '{userid}' blocked userid '{targetUserId}'.");
+
+                return new ProConnectResponse<string>
+                {
+                    body = "Blocked",
+                    message = "User has been blocked. You will no longer see each other in search or recommendations."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"BlockUser failed for userid '{userid}' -> targetUserId '{targetUserId}'.");
+                throw;
+            }
+        }
+
+        // Not cached, unlike GetRecommendations - this list should reflect a brand-new incoming like right
+        // away rather than sitting behind the 15-minute MatchRecommendation TTL. Age hard-filtered and
+        // DB-level offset/limit paged (most-recent-like-first) directly by MatchRepository - see
+        // IMatchRepository.GetIncomingLikes - rather than materializing every pending like just to slice one
+        // page, since a popular profile's incoming-likes pool can't be assumed small at scale.
+        // request.refresh is a no-op here since there's no cache to bypass in the first place.
+        public async Task<ProConnectResponse<MatchCandidatePageResponse>> GetIncomingLikes(Guid userid, MatchCandidatePageRequest request)
+        {
+            try
+            {
+                request ??= new MatchCandidatePageRequest();
+                var criteria = await ResolveEffectiveCriteria(userid);
+
+                var offset = (request.page - 1) * request.pagesize;
+                var likers = await _matchRepository.GetIncomingLikes(userid, criteria, offset, request.pagesize);
+                var totalCount = await _matchRepository.CountIncomingLikes(userid, criteria);
+
+                return new ProConnectResponse<MatchCandidatePageResponse>
+                {
+                    body = BuildPageFromScoredItems(likers, criteria, totalCount, request),
+                    message = "Pending likes have been fetched successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"GetIncomingLikes failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        // Not cached, same reasoning as GetIncomingLikes - this is only ever called on-demand once a user
+        // hits the end of their regular deck (or explicitly wants to revisit passes), not part of the hot
+        // swiping path, so there's no TTL to justify caching against and request.refresh is a no-op. Age
+        // hard-filtered and DB-level offset/limit paged (most-recent-pass-first), same reasoning as
+        // GetIncomingLikes - see IMatchRepository.GetPassedCandidates.
+        public async Task<ProConnectResponse<MatchCandidatePageResponse>> GetSeenProfiles(Guid userid, MatchCandidatePageRequest request)
+        {
+            try
+            {
+                request ??= new MatchCandidatePageRequest();
+                var criteria = await ResolveEffectiveCriteria(userid);
+
+                var offset = (request.page - 1) * request.pagesize;
+                var passed = await _matchRepository.GetPassedCandidates(userid, criteria, offset, request.pagesize);
+                var totalCount = await _matchRepository.CountPassedCandidates(userid, criteria);
+
+                return new ProConnectResponse<MatchCandidatePageResponse>
+                {
+                    body = BuildPageFromScoredItems(passed, criteria, totalCount, request),
+                    message = "Previously passed profiles have been fetched successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"GetSeenProfiles failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        // Shared by GetIncomingLikes and GetSeenProfiles - both already come back from the repository
+        // pre-filtered (self/age/deactivated/blocked) and DB-ordered/paged, so unlike the old
+        // MapToCandidateResponses+BuildPage pair, this only scores the page actually being returned
+        // (city/state/country/industry/interest match against criteria - same weights as ScoreCandidate),
+        // never the whole pool. total_count/has_more come from the repository's own CountIncomingLikes/
+        // CountPassedCandidates call, not from the page size, so paging stays accurate.
+        private static MatchCandidatePageResponse BuildPageFromScoredItems(
+            IEnumerable<UserRequest> pageItems, MatchCriteria criteria, int totalCount, MatchCandidatePageRequest request)
+        {
+            var items = (pageItems ?? Enumerable.Empty<UserRequest>())
+                .Select(c => new MatchCandidateResponse
+                {
+                    userid = c.userid,
+                    public_identifier = c.public_identifier,
+                    full_name = c.full_name,
+                    headline = c.headline,
+                    profile_pic_url = c.profile_pic_url,
+                    occupation = c.occupation,
+                    company = c.company,
+                    city = c.city,
+                    state = c.state,
+                    country = c.country,
+                    score = ScoreCandidate(criteria, c)
+                })
+                .ToList();
+
+            return new MatchCandidatePageResponse
+            {
+                results = items,
+                total_count = totalCount,
+                page = request.page,
+                pagesize = request.pagesize,
+                has_more = (long)request.page * request.pagesize < totalCount
+            };
+        }
+
         private static double ScoreCandidate(MatchCriteria criteria, UserRequest candidate)
         {
             double score = 0;
@@ -268,40 +598,11 @@ namespace ProConnect.Application.Service
             return score;
         }
 
-        private static bool IsWithinAgeRange(MatchCriteria criteria, UserRequest candidate)
-        {
-            if (criteria.min_age is null && criteria.max_age is null)
-                return true;
-
-            var age = CalculateAge(candidate.birth_date);
-            if (age is null)
-                return false;
-
-            if (criteria.min_age.HasValue && age < criteria.min_age.Value)
-                return false;
-
-            if (criteria.max_age.HasValue && age > criteria.max_age.Value)
-                return false;
-
-            return true;
-        }
-
-        private static int? CalculateAge(date birthdate)
-        {
-            if (birthdate is null)
-                return null;
-
-            var str = $"{birthdate.year}-{birthdate.month}-{birthdate.day}";
-            if (!DateTime.TryParse(str, out var birth))
-                return null;
-
-            var today = DateTime.UtcNow;
-            var age = today.Year - birth.Year;
-            if (birth.Date > today.AddYears(-age))
-                age--;
-
-            return age;
-        }
+        // Age filtering for GetIncomingLikes/GetSeenProfiles moved into SQL (MatchRepository.ApplyAgeFilter)
+        // as part of this session's scale pass, same as GetRecommendations' candidate pool - the old
+        // in-memory IsWithinAgeRange/CalculateAge pair (birth_date-string parsing per candidate) is gone,
+        // not just unused, since every caller of this file now gets already-age-filtered rows straight from
+        // the repository.
 
         private static string RecommendationCacheKey(Guid userid) => $"recommendations:{userid}";
 
@@ -315,7 +616,8 @@ namespace ProConnect.Application.Service
                 industry = criteria.industry,
                 min_age = criteria.min_age,
                 max_age = criteria.max_age,
-                interests = criteria.interests
+                interests = criteria.interests,
+                radius_km = criteria.radius_km
             };
         }
     }

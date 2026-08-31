@@ -41,7 +41,21 @@ namespace ProConnect.Infrastructure.Persistence.Entity
         public int? birth_day { get; set; }
         public int? birth_month { get; set; }
         public int? birth_year { get; set; }
+
+        // DB-generated (GENERATED ALWAYS AS ... STORED, see UserEntityConfiguration) from birth_day/month/
+        // year - null whenever any of the three is null, which matches MatchService's existing "unknown
+        // birthdate excludes the candidate from an age-filtered query" semantics for free. Never set from
+        // C# - Postgres computes it on every insert/update. Lets MatchRepository push age-range filtering
+        // into SQL (indexed) instead of loading every candidate and computing age in memory.
+        public DateOnly? birthdate { get; set; }
+
         public string? industry { get; set; }
+
+        // DB-generated lower(industry), see UserEntityConfiguration - lets MatchRepository push an exact,
+        // case-insensitive industry filter into SQL via an indexed column instead of ILIKE/in-memory
+        // comparison. Mirrors the case-insensitive OrdinalIgnoreCase comparison MatchService used to do.
+        public string? industry_normalized { get; set; }
+
         public string? company { get; set; }
         public string[]? interests { get; set; }
 

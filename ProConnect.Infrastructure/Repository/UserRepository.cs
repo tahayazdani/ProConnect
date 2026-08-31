@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using NetTopologySuite;
 using NetTopologySuite.Geometries;
+using ProConnect.Domain.Const;
 using ProConnect.Domain.Request;
 using ProConnect.Domain.Response;
 using ProConnect.Infrastructure.Interface;
@@ -18,10 +19,12 @@ namespace ProConnect.Infrastructure.Repository
         private static readonly GeometryFactory GeometryFactory = NtsGeometryServices.Instance.CreateGeometryFactory(srid: 4326);
 
         private readonly IDbContextFactory<ProConnectDbContext> _dbContextFactory;
+        private readonly Cache _cache;
 
-        public UserRepository(IDbContextFactory<ProConnectDbContext> dbContextFactory)
+        public UserRepository(IDbContextFactory<ProConnectDbContext> dbContextFactory, Cache cache)
         {
             _dbContextFactory = dbContextFactory;
+            _cache = cache;
         }
 
         public async Task<SignUpResponse> SignUp(UserRequest request)
@@ -39,12 +42,22 @@ namespace ProConnect.Infrastructure.Repository
         // deactivated user is invisible to GetById/GetBySub (blocks their own self-service profile
         // and LinkedIn re-sign-in lookups) just as much as they're invisible to other users' searches
         // and match candidates (see MatchRepository/SearchRepository).
+        //
+        // Cache-aside (CacheRegion.USERPROFILE) - this is a hot-path lookup, hit on every
+        // MatchService.ResolveEffectiveCriteria call (i.e. every recommendations/incoming-likes/seen/
+        // criteria request), previously an uncached DB round trip on every single one of those. A
+        // deactivated user (null result) is deliberately NOT cached - Cache.Set is a no-op for null data
+        // (see Cache.Set), so deactivation is reflected on the very next read rather than waiting out the
+        // TTL. Invalidated proactively on every write below rather than relying purely on the TTL to expire.
         public async Task<UserRequest> GetById(Guid userid)
         {
-            await using var db = await _dbContextFactory.CreateDbContextAsync();
+            return await _cache.Get(UserCacheKey(userid), async () =>
+            {
+                await using var db = await _dbContextFactory.CreateDbContextAsync();
 
-            var entity = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.userid == userid && u.is_active);
-            return entity is null ? null : ToDomain(entity);
+                var entity = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.userid == userid && u.is_active);
+                return entity is null ? null : ToDomain(entity);
+            }, CacheRegion.USERPROFILE, CacheExpiry.UserProfile);
         }
 
         public async Task<UserRequest> GetBySub(string sub)
@@ -75,6 +88,10 @@ namespace ProConnect.Infrastructure.Repository
             CopyToEntity(request, entity);
             await db.SaveChangesAsync();
 
+            // stale GetById cache entry would otherwise keep serving the pre-edit profile for up to
+            // CacheExpiry.UserProfile
+            await _cache.Delete(UserCacheKey(request.userid), CacheRegion.USERPROFILE);
+
             return ToDomain(entity);
         }
 
@@ -91,6 +108,11 @@ namespace ProConnect.Infrastructure.Repository
 
             entity.is_active = false;
             await db.SaveChangesAsync();
+
+            // without this, a cached (pre-deactivation) GetById result could keep this user showing up as
+            // active to callers of ResolveEffectiveCriteria for up to CacheExpiry.UserProfile
+            await _cache.Delete(UserCacheKey(userid), CacheRegion.USERPROFILE);
+
             return true;
         }
 
@@ -106,16 +128,22 @@ namespace ProConnect.Infrastructure.Repository
 
             entity.is_active = true;
             await db.SaveChangesAsync();
+
+            // GetById never caches a deactivated (null) result to begin with (see GetById), but clearing
+            // here too keeps this method's invalidation behavior symmetric with Deactivate rather than
+            // relying on that as the only reason it's safe.
+            await _cache.Delete(UserCacheKey(userid), CacheRegion.USERPROFILE);
+
             return true;
         }
 
         // Explicit, ordered deletion inside a transaction rather than relying purely on DB cascade FKs -
-        // matches.userid_b is intentionally OnDelete(Restrict), not Cascade (see
-        // MatchEntityConfiguration), so a bare "delete the user row" would fail with a FK violation for
-        // any match where this user is userid_b. Deleting children first (swipes, matches, match
-        // criteria) before the user row itself sidesteps that regardless of each FK's configured
-        // OnDelete behavior. ExecuteDeleteAsync issues a bulk DELETE per table instead of loading rows
-        // into memory first.
+        // matches.userid_b and blocks.blocked_user_id are intentionally OnDelete(Restrict), not Cascade
+        // (see MatchEntityConfiguration / BlockEntityConfiguration), so a bare "delete the user row" would
+        // fail with a FK violation for any match/block where this user is on the Restrict side. Deleting
+        // children first (swipes, matches, blocks, match criteria) before the user row itself sidesteps
+        // that regardless of each FK's configured OnDelete behavior. ExecuteDeleteAsync issues a bulk
+        // DELETE per table instead of loading rows into memory first.
         public async Task<bool> DeleteAccount(Guid userid)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
@@ -128,12 +156,18 @@ namespace ProConnect.Infrastructure.Repository
 
             await db.Swipes.Where(s => s.userid == userid || s.targetuserid == userid).ExecuteDeleteAsync();
             await db.Matches.Where(m => m.userid_a == userid || m.userid_b == userid).ExecuteDeleteAsync();
+            await db.Blocks.Where(b => b.blocker_user_id == userid || b.blocked_user_id == userid).ExecuteDeleteAsync();
             await db.MatchCriteria.Where(c => c.userid == userid).ExecuteDeleteAsync();
             await db.Users.Where(u => u.userid == userid).ExecuteDeleteAsync();
 
             await transaction.CommitAsync();
+
+            await _cache.Delete(UserCacheKey(userid), CacheRegion.USERPROFILE);
+
             return true;
         }
+
+        private static string UserCacheKey(Guid userid) => $"user:{userid}";
 
         private static UserEntity ToEntity(UserRequest request)
         {

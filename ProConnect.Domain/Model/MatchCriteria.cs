@@ -21,5 +21,12 @@ namespace ProConnect.Domain.Model
         public int? min_age { get; set; }
         public int? max_age { get; set; }
         public string[] interests { get; set; }
+
+        /// <summary>
+        /// Optional "within X km of me" hard filter, centered on the user's own geocoded location - takes
+        /// priority over city/state/country when set (see MatchRepository.GetCandidates). No profile-based
+        /// default, same as min_age/max_age - LinkedIn carries no radius preference either.
+        /// </summary>
+        public double? radius_km { get; set; }
     }
 }

@@ -16,5 +16,10 @@ namespace ProConnect.Infrastructure.Persistence.Entity
         public int? min_age { get; set; }
         public int? max_age { get; set; }
         public string[]? interests { get; set; }
+
+        // Mirrors ProConnect.Domain.Model.MatchCriteria.radius_km - takes priority over city/state/country
+        // for candidate filtering when set (see MatchRepository.GetCandidates). No profile-based default,
+        // same as min_age/max_age.
+        public double? radius_km { get; set; }
     }
 }

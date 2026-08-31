@@ -21,8 +21,27 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                 .HasAnnotation("ProductVersion", "8.0.11")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
+            NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "pg_trgm");
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "postgis");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.BlockEntity", b =>
+                {
+                    b.Property<Guid>("blocker_user_id")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("blocked_user_id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("blocked_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("blocker_user_id", "blocked_user_id");
+
+                    b.HasIndex("blocked_user_id");
+
+                    b.ToTable("blocks", (string)null);
+                });
 
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.MatchCriteriaEntity", b =>
                 {
@@ -46,6 +65,9 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
 
                     b.Property<int?>("min_age")
                         .HasColumnType("integer");
+
+                    b.Property<double?>("radius_km")
+                        .HasColumnType("double precision");
 
                     b.Property<string>("state")
                         .HasColumnType("text");
@@ -118,6 +140,11 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.Property<int?>("birth_year")
                         .HasColumnType("integer");
 
+                    b.Property<DateOnly?>("birthdate")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("date")
+                        .HasComputedColumnSql("make_date(birth_year, birth_month, birth_day)", true);
+
                     b.Property<string>("city")
                         .HasColumnType("text");
 
@@ -150,6 +177,11 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
 
                     b.Property<string>("industry")
                         .HasColumnType("text");
+
+                    b.Property<string>("industry_normalized")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("text")
+                        .HasComputedColumnSql("lower(industry)", true);
 
                     b.Property<string[]>("interests")
                         .HasColumnType("text[]");
@@ -191,18 +223,82 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
 
                     b.HasKey("userid");
 
+                    b.HasIndex("birthdate");
+
+                    b.HasIndex("city");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("city"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("city"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("company");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("company"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("company"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("country");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("country"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("country"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("full_name");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("full_name"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("full_name"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("headline");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("headline"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("headline"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("industry");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("industry"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("industry"), new[] { "gin_trgm_ops" });
+
+                    b.HasIndex("industry_normalized");
+
                     b.HasIndex("is_active");
 
                     b.HasIndex("location");
 
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("location"), "GIST");
 
+                    b.HasIndex("occupation");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("occupation"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("occupation"), new[] { "gin_trgm_ops" });
+
                     b.HasIndex("public_identifier");
+
+                    b.HasIndex("state");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("state"), "gin");
+                    NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("state"), new[] { "gin_trgm_ops" });
 
                     b.HasIndex("sub")
                         .IsUnique();
 
-                    b.ToTable("users", (string)null);
+                    b.ToTable("users", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_users_birth_day_range", "birth_day IS NULL OR (birth_day BETWEEN 1 AND 31)");
+
+                            t.HasCheckConstraint("CK_users_birth_month_range", "birth_month IS NULL OR (birth_month BETWEEN 1 AND 12)");
+                        });
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.BlockEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("blocked_user_id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("blocker_user_id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.MatchCriteriaEntity", b =>
