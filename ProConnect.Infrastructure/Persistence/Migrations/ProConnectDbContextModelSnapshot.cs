@@ -101,6 +101,40 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.ToTable("matches", (string)null);
                 });
 
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.MessageEntity", b =>
+                {
+                    b.Property<Guid>("messageid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("content")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("is_read")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("matchid")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("read_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("senderuserid")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("sent_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("messageid");
+
+                    b.HasIndex("senderuserid");
+
+                    b.HasIndex("matchid", "sent_at_utc");
+
+                    b.ToTable("messages", (string)null);
+                });
+
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.SwipeEntity", b =>
                 {
                     b.Property<Guid>("userid")
@@ -321,6 +355,21 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
                         .WithMany()
                         .HasForeignKey("userid_b")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.MessageEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.MatchEntity", null)
+                        .WithMany()
+                        .HasForeignKey("matchid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("senderuserid")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

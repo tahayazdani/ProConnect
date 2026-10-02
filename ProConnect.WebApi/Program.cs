@@ -20,6 +20,7 @@ using ProConnect.Infrastructure.Provider;
 using ProConnect.Infrastructure.Repository;
 using ProConnect.WebApi.DI;
 using ProConnect.WebApi.Filter;
+using ProConnect.WebApi.Hubs;
 using ProConnect.WebApi.Middleware;
 using Serilog;
 using Serilog.Context;
@@ -82,6 +83,11 @@ internal class Program
         builder.Services.AddRouting(options => options.LowercaseUrls = true);
         builder.Services.AddHttpClient();
 
+        // Real-time push layer for messaging (MessageHub) - additive to the REST send/list endpoints,
+        // see IMessageNotifier/MessageHub doc comments. Part of the ASP.NET Core shared framework
+        // (Microsoft.NET.Sdk.Web), no extra NuGet package needed for the server side.
+        builder.Services.AddSignalR();
+
 
         // register services 
         builder.Services.AddHttpContextAccessor();
@@ -97,9 +103,16 @@ internal class Program
         builder.Services.AddSingleton<IMatchRepository, MatchRepository>();
         builder.Services.AddSingleton<ISearchService, SearchService>();
         builder.Services.AddSingleton<ISearchRepository, SearchRepository>();
+        builder.Services.AddSingleton<IMessageService, MessageService>();
+        builder.Services.AddSingleton<IMessageRepository, MessageRepository>();
+        // SignalR's IHubContext<MessageHub> is itself registered as a singleton by AddSignalR() below,
+        // matching this project's Singleton-everywhere DI style.
+        builder.Services.AddSingleton<IMessageNotifier, SignalRMessageNotifier>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
         builder.Services.AddSingleton<IValidator<SearchRequest>, SearchRequestValidator>();
         builder.Services.AddSingleton<IValidator<MatchCandidatePageRequest>, MatchCandidatePageRequestValidator>();
+        builder.Services.AddSingleton<IValidator<MessageRequest>, MessageRequestValidator>();
+        builder.Services.AddSingleton<IValidator<MessagePageRequest>, MessagePageRequestValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
 
@@ -163,6 +176,22 @@ internal class Program
                 ValidateLifetime = true,
                 ClockSkew = TimeSpan.FromMinutes(1)
             };
+
+            // SignalR's browser/.NET clients can't set an Authorization header on the WebSocket
+            // handshake itself, so the standard pattern is to send the token as an "access_token" query
+            // string parameter instead and have the JWT handler read it from there - but only for the
+            // hub's own path, so every other (REST) request still requires a real Authorization header.
+            options.Events = new JwtBearerEvents
+            {
+                OnMessageReceived = context =>
+                {
+                    var accessToken = context.Request.Query["access_token"];
+                    if (!string.IsNullOrEmpty(accessToken) && context.HttpContext.Request.Path.StartsWithSegments("/hubs"))
+                        context.Token = accessToken;
+
+                    return Task.CompletedTask;
+                }
+            };
         });
 
         // every endpoint requires authentication unless explicitly marked [AllowAnonymous]
@@ -197,6 +226,7 @@ internal class Program
         app.UseAuthorization();
         app.UseCookiePolicy();
         app.MapControllers();
+        app.MapHub<MessageHub>("/hubs/messages");
         app.UseMiddleware<LoggingMiddleware>();
         app.UseMiddleware<ExceptionHandlingMiddleware>();
 

@@ -22,6 +22,7 @@ namespace ProConnect.Infrastructure.Persistence
         public DbSet<SwipeEntity> Swipes => Set<SwipeEntity>();
         public DbSet<MatchEntity> Matches => Set<MatchEntity>();
         public DbSet<BlockEntity> Blocks => Set<BlockEntity>();
+        public DbSet<MessageEntity> Messages => Set<MessageEntity>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
