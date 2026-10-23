@@ -135,6 +135,524 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.ToTable("messages", (string)null);
                 });
 
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.NotificationChannelConfigEntity", b =>
+                {
+                    b.Property<Guid>("notificationchannelconfigid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("channel")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("is_enabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("notification_type")
+                        .HasColumnType("integer");
+
+                    b.HasKey("notificationchannelconfigid");
+
+                    b.HasIndex("notification_type", "channel")
+                        .IsUnique();
+
+                    b.ToTable("notification_channel_config", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000001"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 0
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000002"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 0
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000003"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 1
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000004"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 1
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000005"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 2
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000006"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 2
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000007"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 3
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000008"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 3
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000009"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 4
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000010"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 4
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000011"),
+                            channel = 0,
+                            is_enabled = true,
+                            notification_type = 5
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000012"),
+                            channel = 1,
+                            is_enabled = false,
+                            notification_type = 5
+                        });
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.NotificationEntity", b =>
+                {
+                    b.Property<Guid>("notificationid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("body")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("created_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("is_read")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("read_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("related_entity_id")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("type")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("notificationid");
+
+                    b.HasIndex("userid", "created_at_utc");
+
+                    b.HasIndex("userid", "is_read");
+
+                    b.ToTable("notification", (string)null);
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.PaymentTransactionEntity", b =>
+                {
+                    b.Property<Guid>("transactionid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("amount")
+                        .HasColumnType("numeric(10,2)");
+
+                    b.Property<DateTime>("created_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("currency")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("description")
+                        .HasColumnType("text");
+
+                    b.Property<int>("status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("stripe_event_id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("stripe_session_id")
+                        .HasColumnType("text");
+
+                    b.Property<int>("type")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("transactionid");
+
+                    b.HasIndex("stripe_event_id")
+                        .IsUnique()
+                        .HasFilter("stripe_event_id IS NOT NULL");
+
+                    b.HasIndex("userid", "created_at_utc");
+
+                    b.ToTable("payment_transaction", (string)null);
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.PlanFeatureEntity", b =>
+                {
+                    b.Property<Guid>("planfeatureid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("feature_key")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("is_enabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("limit_value")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("planid")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("reset_period")
+                        .HasColumnType("integer");
+
+                    b.HasKey("planfeatureid");
+
+                    b.HasIndex("planid", "feature_key")
+                        .IsUnique();
+
+                    b.ToTable("plan_feature", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000001"),
+                            feature_key = "daily_likes",
+                            is_enabled = true,
+                            limit_value = 10,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 1
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000002"),
+                            feature_key = "who_liked_me_visible",
+                            is_enabled = false,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000003"),
+                            feature_key = "radius_search_enabled",
+                            is_enabled = false,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000004"),
+                            feature_key = "read_receipts_enabled",
+                            is_enabled = false,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000005"),
+                            feature_key = "rewind_enabled",
+                            is_enabled = false,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("11111111-1111-0000-0000-000000000006"),
+                            feature_key = "monthly_roses",
+                            is_enabled = false,
+                            limit_value = 0,
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            reset_period = 2
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000001"),
+                            feature_key = "daily_likes",
+                            is_enabled = true,
+                            limit_value = 50,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 1
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000002"),
+                            feature_key = "who_liked_me_visible",
+                            is_enabled = true,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000003"),
+                            feature_key = "radius_search_enabled",
+                            is_enabled = true,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000004"),
+                            feature_key = "read_receipts_enabled",
+                            is_enabled = false,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000005"),
+                            feature_key = "rewind_enabled",
+                            is_enabled = true,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("22222222-2222-0000-0000-000000000006"),
+                            feature_key = "monthly_roses",
+                            is_enabled = true,
+                            limit_value = 1,
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            reset_period = 2
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000001"),
+                            feature_key = "daily_likes",
+                            is_enabled = true,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 1
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000002"),
+                            feature_key = "who_liked_me_visible",
+                            is_enabled = true,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000003"),
+                            feature_key = "radius_search_enabled",
+                            is_enabled = true,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000004"),
+                            feature_key = "read_receipts_enabled",
+                            is_enabled = true,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000005"),
+                            feature_key = "rewind_enabled",
+                            is_enabled = true,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 0
+                        },
+                        new
+                        {
+                            planfeatureid = new Guid("33333333-3333-0000-0000-000000000006"),
+                            feature_key = "monthly_roses",
+                            is_enabled = true,
+                            limit_value = 5,
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            reset_period = 2
+                        });
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.ProductEntity", b =>
+                {
+                    b.Property<Guid>("productid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("consumable_key")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("currency")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("description")
+                        .HasColumnType("text");
+
+                    b.Property<string>("display_name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("is_active")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal>("price")
+                        .HasColumnType("numeric(10,2)");
+
+                    b.Property<int>("quantity_granted")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("stripe_price_id")
+                        .HasColumnType("text");
+
+                    b.HasKey("productid");
+
+                    b.HasIndex("consumable_key");
+
+                    b.ToTable("product", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            productid = new Guid("44444444-0000-0000-0000-000000000001"),
+                            consumable_key = "rose",
+                            currency = "usd",
+                            description = "Stand out in 5 people's queues.",
+                            display_name = "5 Roses",
+                            is_active = true,
+                            price = 9.99m,
+                            quantity_granted = 5
+                        },
+                        new
+                        {
+                            productid = new Guid("44444444-0000-0000-0000-000000000002"),
+                            consumable_key = "boost",
+                            currency = "usd",
+                            description = "Be a top profile in your area for 30 minutes.",
+                            display_name = "1 Boost",
+                            is_active = true,
+                            price = 4.99m,
+                            quantity_granted = 1
+                        });
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.SubscriptionPlanEntity", b =>
+                {
+                    b.Property<Guid>("planid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("description")
+                        .HasColumnType("text");
+
+                    b.Property<string>("display_name")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("is_active")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("plan_code")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<decimal>("price_annual")
+                        .HasColumnType("numeric(10,2)");
+
+                    b.Property<decimal>("price_monthly")
+                        .HasColumnType("numeric(10,2)");
+
+                    b.Property<int>("sort_order")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("stripe_price_id_annual")
+                        .HasColumnType("text");
+
+                    b.Property<string>("stripe_price_id_monthly")
+                        .HasColumnType("text");
+
+                    b.HasKey("planid");
+
+                    b.HasIndex("plan_code")
+                        .IsUnique();
+
+                    b.ToTable("subscription_plan", (string)null);
+
+                    b.HasData(
+                        new
+                        {
+                            planid = new Guid("11111111-0000-0000-0000-000000000001"),
+                            description = "Get started for free.",
+                            display_name = "Free",
+                            is_active = true,
+                            plan_code = "FREE",
+                            price_annual = 0m,
+                            price_monthly = 0m,
+                            sort_order = 1
+                        },
+                        new
+                        {
+                            planid = new Guid("22222222-0000-0000-0000-000000000002"),
+                            description = "More likes, see who liked you, and search by radius.",
+                            display_name = "Plus",
+                            is_active = true,
+                            plan_code = "PLUS",
+                            price_annual = 59.99m,
+                            price_monthly = 9.99m,
+                            sort_order = 2
+                        },
+                        new
+                        {
+                            planid = new Guid("33333333-0000-0000-0000-000000000003"),
+                            description = "Unlimited likes and every feature, unlocked.",
+                            display_name = "Premium",
+                            is_active = true,
+                            plan_code = "PREMIUM",
+                            price_annual = 119.99m,
+                            price_monthly = 19.99m,
+                            sort_order = 3
+                        });
+                });
+
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.SwipeEntity", b =>
                 {
                     b.Property<Guid>("userid")
@@ -154,6 +672,57 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.HasIndex("targetuserid", "userid");
 
                     b.ToTable("swipes", (string)null);
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserConsumableBalanceEntity", b =>
+                {
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("feature_key")
+                        .HasColumnType("text");
+
+                    b.Property<int>("balance")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("updated_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("userid", "feature_key");
+
+                    b.ToTable("user_consumable_balance", (string)null);
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserDeviceTokenEntity", b =>
+                {
+                    b.Property<Guid>("userdevicetokenid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("created_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("device_token")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("last_seen_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("platform")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("userdevicetokenid");
+
+                    b.HasIndex("device_token")
+                        .IsUnique();
+
+                    b.HasIndex("userid");
+
+                    b.ToTable("user_device_token", (string)null);
                 });
 
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserEntity", b =>
@@ -320,6 +889,81 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserFeatureUsageEntity", b =>
+                {
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("feature_key")
+                        .HasColumnType("text");
+
+                    b.Property<string>("period_key")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("updated_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("used_count")
+                        .HasColumnType("integer");
+
+                    b.HasKey("userid", "feature_key", "period_key");
+
+                    b.ToTable("user_feature_usage", (string)null);
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserSubscriptionEntity", b =>
+                {
+                    b.Property<Guid>("usersubscriptionid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("billing_interval")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("cancel_at_period_end")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("created_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("current_period_end_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("current_period_start_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("planid")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("stripe_customer_id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("stripe_subscription_id")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("updated_at_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("usersubscriptionid");
+
+                    b.HasIndex("planid");
+
+                    b.HasIndex("stripe_customer_id");
+
+                    b.HasIndex("stripe_subscription_id");
+
+                    b.HasIndex("userid")
+                        .IsUnique();
+
+                    b.ToTable("user_subscription", (string)null);
+                });
+
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.BlockEntity", b =>
                 {
                     b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
@@ -374,6 +1018,33 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.NotificationEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.PaymentTransactionEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.PlanFeatureEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.SubscriptionPlanEntity", null)
+                        .WithMany()
+                        .HasForeignKey("planid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.SwipeEntity", b =>
                 {
                     b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
@@ -385,6 +1056,48 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
                         .WithMany()
                         .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserConsumableBalanceEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserDeviceTokenEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserFeatureUsageEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.UserSubscriptionEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.SubscriptionPlanEntity", null)
+                        .WithMany()
+                        .HasForeignKey("planid")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithOne()
+                        .HasForeignKey("ProConnect.Infrastructure.Persistence.Entity.UserSubscriptionEntity", "userid")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

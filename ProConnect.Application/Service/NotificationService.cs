@@ -1,0 +1,275 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using ProConnect.Application.Interface;
+using ProConnect.Domain.Const;
+using ProConnect.Domain.Model;
+using ProConnect.Domain.Request;
+using ProConnect.Domain.Response;
+using ProConnect.Infrastructure.Interface;
+
+namespace ProConnect.Application.Service
+{
+    /// <summary>
+    /// See INotificationService remarks. Notify is deliberately the only way a Notification row ever gets
+    /// created - MatchService/SubscriptionService call it inline after whatever they were actually doing
+    /// (recording a match, applying a webhook) has already durably succeeded, and Notify itself never
+    /// throws, so a push/live-update failure can never unwind the caller's own successful write.
+    /// </summary>
+    public class NotificationService : INotificationService
+    {
+        private readonly INotificationRepository _notificationRepository;
+        private readonly IPushNotificationGateway _pushNotificationGateway;
+        private readonly INotificationNotifier _notificationNotifier;
+        private readonly ILogger<NotificationService> _logger;
+
+        public NotificationService(
+            INotificationRepository notificationRepository,
+            IPushNotificationGateway pushNotificationGateway,
+            INotificationNotifier notificationNotifier,
+            ILogger<NotificationService> logger)
+        {
+            _notificationRepository = notificationRepository;
+            _pushNotificationGateway = pushNotificationGateway;
+            _notificationNotifier = notificationNotifier;
+            _logger = logger;
+        }
+
+        public async Task Notify(Guid userid, NotificationType type, string title, string body, Guid? related_entity_id = null)
+        {
+            Notification notification;
+            try
+            {
+                notification = await _notificationRepository.CreateNotification(new Notification
+                {
+                    userid = userid,
+                    type = type,
+                    title = title,
+                    body = body,
+                    related_entity_id = related_entity_id,
+                    is_read = false
+                });
+            }
+            catch (Exception ex)
+            {
+                // Unlike the push/live-update steps below, persisting the row IS the source of truth - if
+                // this fails there's nothing further to do, but it still must never bubble up and fail
+                // whatever the caller (e.g. MatchService.Swipe) was actually doing.
+                _logger.LogError(ex, $"Notify failed to persist a '{type}' notification for userid '{userid}'.");
+                return;
+            }
+
+            var response = ToResponse(notification);
+
+            await TryPushNotify(userid, type, title, body, related_entity_id);
+            await TryLiveNotify(userid, response);
+        }
+
+        private async Task TryPushNotify(Guid userid, NotificationType type, string title, string body, Guid? related_entity_id)
+        {
+            try
+            {
+                if (!await _notificationRepository.IsChannelEnabled(type, NotificationChannel.Push))
+                    return;
+
+                var tokens = await _notificationRepository.GetDeviceTokens(userid);
+                if (tokens.Count == 0) return;
+
+                var data = new Dictionary<string, string> { ["notification_type"] = type.ToString() };
+                if (related_entity_id.HasValue)
+                    data["related_entity_id"] = related_entity_id.Value.ToString();
+
+                await _pushNotificationGateway.SendPushAsync(tokens.Select(t => t.device_token), title, body, data);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Push dispatch failed for a '{type}' notification to userid '{userid}' (notification row was still persisted).");
+            }
+        }
+
+        private async Task TryLiveNotify(Guid userid, NotificationResponse response)
+        {
+            try
+            {
+                await _notificationNotifier.NotifyNewNotification(userid, response);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Live NotifyNewNotification failed for userid '{userid}' (notification '{response.notificationid}' was still persisted).");
+            }
+        }
+
+        private async Task TryNotifyUnreadCountChanged(Guid userid)
+        {
+            try
+            {
+                var unread = await _notificationRepository.CountUnread(userid);
+                await _notificationNotifier.NotifyUnreadCountChanged(userid, unread);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Live NotifyUnreadCountChanged failed for userid '{userid}'.");
+            }
+        }
+
+        public async Task<ProConnectResponse<NotificationPageResponse>> GetNotifications(Guid userid, NotificationPageRequest request)
+        {
+            try
+            {
+                request ??= new NotificationPageRequest();
+
+                var offset = (request.page - 1) * request.pagesize;
+                var notifications = await _notificationRepository.GetNotifications(userid, offset, request.pagesize);
+                var totalCount = await _notificationRepository.CountNotifications(userid);
+
+                return new ProConnectResponse<NotificationPageResponse>
+                {
+                    body = new NotificationPageResponse
+                    {
+                        results = notifications.Select(ToResponse).ToList(),
+                        total_count = totalCount,
+                        page = request.page,
+                        pagesize = request.pagesize,
+                        has_more = (long)request.page * request.pagesize < totalCount
+                    },
+                    message = "Notifications have been fetched successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"GetNotifications failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<UnreadCountResponse>> GetUnreadCount(Guid userid)
+        {
+            try
+            {
+                var unread = await _notificationRepository.CountUnread(userid);
+                return new ProConnectResponse<UnreadCountResponse>
+                {
+                    body = new UnreadCountResponse { unread_count = unread },
+                    message = "Unread count has been fetched successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"GetUnreadCount failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> MarkAsRead(Guid userid, Guid notificationid)
+        {
+            try
+            {
+                var marked = await _notificationRepository.MarkAsRead(userid, notificationid);
+                if (!marked)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Notification not found.",
+                        message = "Notification not found."
+                    };
+
+                await TryNotifyUnreadCountChanged(userid);
+
+                return new ProConnectResponse<string> { body = "ok", message = "Notification marked as read." };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"MarkAsRead failed for userid '{userid}' -> notificationid '{notificationid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> MarkAllAsRead(Guid userid)
+        {
+            try
+            {
+                var count = await _notificationRepository.MarkAllAsRead(userid);
+                if (count > 0)
+                    await TryNotifyUnreadCountChanged(userid);
+
+                return new ProConnectResponse<string>
+                {
+                    body = "ok",
+                    message = $"{count} notification(s) marked as read."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"MarkAllAsRead failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> RegisterDevice(Guid userid, RegisterDeviceTokenRequest request)
+        {
+            try
+            {
+                if (request is null || string.IsNullOrWhiteSpace(request.device_token))
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "A valid device_token is required.",
+                        message = "A valid device_token is required."
+                    };
+
+                await _notificationRepository.UpsertDeviceToken(userid, request.device_token, request.platform);
+
+                return new ProConnectResponse<string> { body = "ok", message = "Device has been registered for push notifications." };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"RegisterDevice failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        public async Task<ProConnectResponse<string>> UnregisterDevice(Guid userid, string device_token)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(device_token))
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "A valid device_token is required.",
+                        message = "A valid device_token is required."
+                    };
+
+                var removed = await _notificationRepository.RemoveDeviceToken(userid, device_token);
+                if (!removed)
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Device not found.",
+                        message = "Device not found."
+                    };
+
+                return new ProConnectResponse<string> { body = "ok", message = "Device has been unregistered." };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"UnregisterDevice failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        private static NotificationResponse ToResponse(Notification n) => new NotificationResponse
+        {
+            notificationid = n.notificationid,
+            type = n.type,
+            title = n.title,
+            body = n.body,
+            related_entity_id = n.related_entity_id,
+            is_read = n.is_read,
+            created_at_utc = n.created_at_utc,
+            read_at_utc = n.read_at_utc
+        };
+    }
+}

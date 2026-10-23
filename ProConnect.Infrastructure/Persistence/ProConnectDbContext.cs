@@ -23,6 +23,16 @@ namespace ProConnect.Infrastructure.Persistence
         public DbSet<MatchEntity> Matches => Set<MatchEntity>();
         public DbSet<BlockEntity> Blocks => Set<BlockEntity>();
         public DbSet<MessageEntity> Messages => Set<MessageEntity>();
+        public DbSet<SubscriptionPlanEntity> SubscriptionPlans => Set<SubscriptionPlanEntity>();
+        public DbSet<PlanFeatureEntity> PlanFeatures => Set<PlanFeatureEntity>();
+        public DbSet<UserSubscriptionEntity> UserSubscriptions => Set<UserSubscriptionEntity>();
+        public DbSet<ProductEntity> Products => Set<ProductEntity>();
+        public DbSet<UserConsumableBalanceEntity> UserConsumableBalances => Set<UserConsumableBalanceEntity>();
+        public DbSet<UserFeatureUsageEntity> UserFeatureUsages => Set<UserFeatureUsageEntity>();
+        public DbSet<PaymentTransactionEntity> PaymentTransactions => Set<PaymentTransactionEntity>();
+        public DbSet<NotificationEntity> Notifications => Set<NotificationEntity>();
+        public DbSet<NotificationChannelConfigEntity> NotificationChannelConfigs => Set<NotificationChannelConfigEntity>();
+        public DbSet<UserDeviceTokenEntity> UserDeviceTokens => Set<UserDeviceTokenEntity>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {

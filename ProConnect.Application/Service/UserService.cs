@@ -27,6 +27,7 @@ namespace ProConnect.Application.Service
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
         private readonly ITokenService _tokenService;
+        private readonly IMatchService _matchService;
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
@@ -35,6 +36,7 @@ namespace ProConnect.Application.Service
                            ILogger<UserService> logger,
                            Cache cache,
                            ITokenService tokenService,
+                           IMatchService matchService,
                            IOptions<ProConnectConfig> proConnectConfig
                            )
         {
@@ -45,8 +47,18 @@ namespace ProConnect.Application.Service
             _logger = logger;
             _cache = cache;
             _tokenService = tokenService;
+            _matchService = matchService;
             _proConnectConfig = proConnectConfig.Value;
         }
+
+        // Fire-and-forget: UserService/MatchService/Cache are all registered Singleton (see Program.cs),
+        // so capturing _matchService in a detached Task is safe - same reasoning as
+        // MatchService.TriggerBackgroundRefill. Called right after every session-establishing event
+        // (sign up / LinkedIn sign-in / "/me") so the caller's response (token, profile, etc.) is never
+        // delayed by a Redis/Postgres round trip that only benefits a *later* request. WarmRecommendations
+        // itself already swallows and logs its own failures, so there is nothing to catch here.
+        private static void TriggerRecommendationWarmUp(IMatchService matchService, Guid userid) =>
+            _ = Task.Run(() => matchService.WarmRecommendations(userid));
         public async Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request)
         {
             var response = new ProConnectResponse<SignUpResponse>();
@@ -145,6 +157,10 @@ namespace ProConnect.Application.Service
                     body = signUpResponse,
                     message = "User has successfully signed up."
                 };
+
+                // brand-new user is about to land on the swipe deck for the first time - see
+                // TriggerRecommendationWarmUp.
+                TriggerRecommendationWarmUp(_matchService, profileResponse.userid);
             }
             catch (Exception ex)
             {
@@ -269,6 +285,9 @@ namespace ProConnect.Application.Service
 
                 userInfoResponse.token = _tokenService.GenerateToken(existingUser.userid, existingUser.public_identifier, existingUser.emailaddress);
 
+                // returning user is about to land on the swipe deck - see TriggerRecommendationWarmUp.
+                TriggerRecommendationWarmUp(_matchService, existingUser.userid);
+
                 var response = new ProConnectResponse<SignInResponse>
                 {
                     body = userInfoResponse,
@@ -295,6 +314,11 @@ namespace ProConnect.Application.Service
                         errormessage = "User not found.",
                         message = "User not found."
                     };
+
+                // SystemAuthentication is the "/me" check the client calls on every app launch/token
+                // refresh (see PROJECT_NOTES.md Phase 1) - the most direct "the user just opened the app"
+                // signal available, so this is the primary warm-up trigger. See TriggerRecommendationWarmUp.
+                TriggerRecommendationWarmUp(_matchService, userid);
 
                 return new ProConnectResponse<SignInResponse>
                 {

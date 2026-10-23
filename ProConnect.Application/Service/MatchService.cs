@@ -28,6 +28,8 @@ namespace ProConnect.Application.Service
         private readonly IMatchCriteriaRepository _matchCriteriaRepository;
         private readonly IMatchRepository _matchRepository;
         private readonly IUserRepository _userRepository;
+        private readonly IFeatureGateService _featureGateService;
+        private readonly INotificationService _notificationService;
         private readonly Cache _cache;
         private readonly ILogger<MatchService> _logger;
 
@@ -35,12 +37,16 @@ namespace ProConnect.Application.Service
             IMatchCriteriaRepository matchCriteriaRepository,
             IMatchRepository matchRepository,
             IUserRepository userRepository,
+            IFeatureGateService featureGateService,
+            INotificationService notificationService,
             Cache cache,
             ILogger<MatchService> logger)
         {
             _matchCriteriaRepository = matchCriteriaRepository;
             _matchRepository = matchRepository;
             _userRepository = userRepository;
+            _featureGateService = featureGateService;
+            _notificationService = notificationService;
             _cache = cache;
             _logger = logger;
         }
@@ -116,6 +122,17 @@ namespace ProConnect.Application.Service
                         issuccessfull = false,
                         errormessage = "radius_km must be greater than zero.",
                         message = "radius_km must be greater than zero."
+                    };
+
+                // Radius-based search is a paid-tier feature (see Const.FeatureKey.RadiusSearchEnabled) -
+                // a Free user attempting to set it gets a clear rejection rather than having it silently
+                // dropped or silently honored.
+                if (request.radius_km.HasValue && !await _featureGateService.IsEnabled(userid, FeatureKey.RadiusSearchEnabled))
+                    return new ProConnectResponse<MatchCriteriaResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Radius-based search is a premium feature. Upgrade your plan to filter by distance.",
+                        message = "Radius-based search is a premium feature. Upgrade your plan to filter by distance."
                     };
 
                 var criteria = new MatchCriteria
@@ -324,6 +341,23 @@ namespace ProConnect.Application.Service
                         message = "You cannot swipe on yourself."
                     };
 
+                // Daily like cap (see Const.FeatureKey.DailyLikes) only applies to Likes - Pass is always
+                // free and unmetered. Checked (and, on success, incremented) before RecordSwipe so a
+                // denied like never gets persisted.
+                if (action == SwipeAction.Like)
+                {
+                    var consumeResult = await _featureGateService.TryConsume(userid, FeatureKey.DailyLikes);
+                    if (!consumeResult.allowed)
+                        return new ProConnectResponse<SwipeResponse>
+                        {
+                            issuccessfull = false,
+                            errormessage = consumeResult.limit.HasValue
+                                ? $"You've reached your daily like limit ({consumeResult.limit}). Upgrade your plan or come back later."
+                                : "Liking is not available on your current plan.",
+                            message = "Daily like limit reached."
+                        };
+                }
+
                 await _matchRepository.RecordSwipe(userid, targetUserId, action);
 
                 if (action != SwipeAction.Like)
@@ -335,13 +369,21 @@ namespace ProConnect.Application.Service
 
                 var targetAlreadyLikedUser = await _matchRepository.HasLiked(targetUserId, userid);
                 if (!targetAlreadyLikedUser)
+                {
+                    // Fires for every like regardless of subscriber tier - see NotifyNewLike remarks for why
+                    // this stays deliberately generic (no liker identity) despite that.
+                    await NotifyNewLike(targetUserId);
+
                     return new ProConnectResponse<SwipeResponse>
                     {
                         body = new SwipeResponse { ismatch = false },
                         message = "Like recorded."
                     };
+                }
 
                 var matchId = await _matchRepository.CreateMatch(userid, targetUserId);
+
+                await NotifyNewMatch(userid, targetUserId, matchId);
 
                 return new ProConnectResponse<SwipeResponse>
                 {
@@ -353,6 +395,51 @@ namespace ProConnect.Application.Service
             {
                 _logger.LogError(ex, $"Swipe ({action}) failed for userid '{userid}' -> targetUserId '{targetUserId}'.");
                 throw;
+            }
+        }
+
+        // Fires to both sides once CreateMatch has already durably succeeded - matching itself reveals both
+        // parties' identities to each other (unlike a one-sided like), so naming the other person in the
+        // body is fine here. INotificationService.Notify itself never throws, but the two GetById lookups
+        // for display names could, so this whole helper is wrapped the same "log and swallow" way
+        // NotificationService's own TryPushNotify/TryLiveNotify are - a notification-text failure must
+        // never unwind the match that was just recorded.
+        private async Task NotifyNewMatch(Guid userid, Guid targetUserId, Guid matchId)
+        {
+            try
+            {
+                var user = await _userRepository.GetById(userid);
+                var target = await _userRepository.GetById(targetUserId);
+
+                await _notificationService.Notify(userid, NotificationType.NewMatch, "It's a match!",
+                    !string.IsNullOrWhiteSpace(target?.full_name) ? $"You and {target.full_name} matched!" : "You have a new match!",
+                    matchId);
+
+                await _notificationService.Notify(targetUserId, NotificationType.NewMatch, "It's a match!",
+                    !string.IsNullOrWhiteSpace(user?.full_name) ? $"You and {user.full_name} matched!" : "You have a new match!",
+                    matchId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"NotifyNewMatch failed for userid '{userid}' <-> targetUserId '{targetUserId}' (match '{matchId}' was still recorded).");
+            }
+        }
+
+        // Fires for every like, regardless of the liked user's subscriber tier - unlike NotifyNewMatch,
+        // "who liked me" visibility is still gated behind FeatureKey.WhoLikedMeVisible (see
+        // GetIncomingLikes), so this deliberately carries no liker identity and no related_entity_id - a
+        // push notification that revealed the liker's userid would let a Free user resolve/view that
+        // profile directly and bypass the paywall entirely. Generic text only.
+        private async Task NotifyNewLike(Guid targetUserId)
+        {
+            try
+            {
+                await _notificationService.Notify(targetUserId, NotificationType.NewLike, "Someone likes you!",
+                    "You have a new like waiting for you.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"NotifyNewLike failed for targetUserId '{targetUserId}'.");
             }
         }
 
@@ -485,6 +572,24 @@ namespace ProConnect.Application.Service
             try
             {
                 request ??= new MatchCandidatePageRequest();
+
+                // "Who liked me" is a paid-tier feature (see Const.FeatureKey.WhoLikedMeVisible) - a
+                // Free user gets an empty, zero-count page back rather than an error, so the client can
+                // render an upsell state instead of having to special-case a failure response.
+                if (!await _featureGateService.IsEnabled(userid, FeatureKey.WhoLikedMeVisible))
+                    return new ProConnectResponse<MatchCandidatePageResponse>
+                    {
+                        body = new MatchCandidatePageResponse
+                        {
+                            results = new List<MatchCandidateResponse>(),
+                            total_count = 0,
+                            page = request.page,
+                            pagesize = request.pagesize,
+                            has_more = false
+                        },
+                        message = "Seeing who liked you is a premium feature. Upgrade your plan to view this list."
+                    };
+
                 var criteria = await ResolveEffectiveCriteria(userid);
 
                 var offset = (request.page - 1) * request.pagesize;
@@ -603,6 +708,27 @@ namespace ProConnect.Application.Service
         // in-memory IsWithinAgeRange/CalculateAge pair (birth_date-string parsing per candidate) is gone,
         // not just unused, since every caller of this file now gets already-age-filtered rows straight from
         // the repository.
+
+        // See IMatchService.WarmRecommendations for the full rationale. Deliberately checks for an
+        // existing, non-empty batch first rather than always calling GrowBatch - a user who already has a
+        // warm/partially-consumed window shouldn't have it clobbered (and Redis shouldn't pay a write) just
+        // because another session-establishing event fired again (e.g. token refresh right after sign-in).
+        public async Task WarmRecommendations(Guid userid)
+        {
+            try
+            {
+                var existing = await _cache.Get<MatchRecommendationBatch>(RecommendationCacheKey(userid), CacheRegion.MATCHRECOMMENDATION);
+                if (existing != null && existing.Items.Count > 0)
+                    return;
+
+                var criteria = await ResolveEffectiveCriteria(userid);
+                await GrowBatch(userid, criteria, new MatchRecommendationBatch());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"WarmRecommendations failed for userid '{userid}'.");
+            }
+        }
 
         private static string RecommendationCacheKey(Guid userid) => $"recommendations:{userid}";
 

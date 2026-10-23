@@ -64,5 +64,16 @@ namespace ProConnect.Application.Interface
         /// normal deck (same Like endpoint, same match logic).
         /// </summary>
         Task<ProConnectResponse<MatchCandidatePageResponse>> GetSeenProfiles(Guid userid, MatchCandidatePageRequest request);
+        /// <summary>
+        /// Best-effort proactive cache warm-up for GetRecommendations - not a client-facing endpoint, meant
+        /// to be fired (fire-and-forget) by UserService right after a session-establishing event
+        /// (sign up / sign in / the "/me" check) so the recommendation window is already sitting in Redis
+        /// by the time the client actually requests the deck, instead of paying the first GetCandidates
+        /// round trip inside that request's critical path. A no-op if a window is already cached (never
+        /// forces a refresh - that is what MatchCandidatePageRequest.refresh is for), and swallows/logs its
+        /// own failures rather than throwing, since a failed warm-up should never be visible to the caller
+        /// that triggered it - the cold path in GetRecommendations is still a correct fallback.
+        /// </summary>
+        Task WarmRecommendations(Guid userid);
     }
 }

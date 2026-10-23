@@ -17,6 +17,8 @@ namespace ProConnect.Domain.Config
         public JwtConfig jwtConfig { get; set; }
         public DataBaseConfig dataBaseConfig { get; set; }
         public GeocodingConfig geocodingConfig { get; set; }
+        public StripeConfig stripeConfig { get; set; }
+        public PushConfig pushConfig { get; set; }
 
     }
 }

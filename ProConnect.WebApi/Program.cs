@@ -115,6 +115,25 @@ internal class Program
         builder.Services.AddSingleton<IValidator<MessagePageRequest>, MessagePageRequestValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
+        // Phase 7 - subscriptions/payments. IPaymentGateway is the only seam that knows about Stripe
+        // (see StripePaymentGateway remarks); IFeatureGateService is the only seam that knows what a
+        // plan/feature grants (see FeatureGateService remarks) - MatchService and SubscriptionService
+        // both depend on it, never on ISubscriptionRepository directly for entitlement decisions.
+        builder.Services.AddSingleton<ISubscriptionRepository, SubscriptionRepository>();
+        builder.Services.AddSingleton<IPaymentGateway, StripePaymentGateway>();
+        builder.Services.AddSingleton<IFeatureGateService, FeatureGateService>();
+        builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
+
+        // Phase 6 - notifications. INotificationService.Notify is the single entry point MatchService/
+        // SubscriptionService call to raise one; IPushNotificationGateway confines the FirebaseAdmin SDK
+        // (FCM unifies Web/iOS/Android push behind one API) the same way IPaymentGateway confines
+        // Stripe.net, and INotificationNotifier/NotificationHub mirrors IMessageNotifier/MessageHub for
+        // the live in-app (SignalR) side - see each interface's own remarks.
+        builder.Services.AddSingleton<INotificationRepository, NotificationRepository>();
+        builder.Services.AddSingleton<IPushNotificationGateway, FcmPushNotificationGateway>();
+        builder.Services.AddSingleton<INotificationNotifier, SignalRNotificationNotifier>();
+        builder.Services.AddSingleton<INotificationService, NotificationService>();
+
 
         // register database (Postgres/PostGIS via EF Core + Npgsql). A pooled factory (rather than
         // AddDbContext, which registers a scoped DbContext) is used because the repositories above are
@@ -227,6 +246,7 @@ internal class Program
         app.UseCookiePolicy();
         app.MapControllers();
         app.MapHub<MessageHub>("/hubs/messages");
+        app.MapHub<NotificationHub>("/hubs/notifications");
         app.UseMiddleware<LoggingMiddleware>();
         app.UseMiddleware<ExceptionHandlingMiddleware>();
 
