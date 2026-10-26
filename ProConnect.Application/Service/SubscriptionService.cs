@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Stripe;
 using ProConnect.Application.Interface;
 using ProConnect.Domain.Const;
 using ProConnect.Domain.Model;
@@ -159,6 +160,22 @@ namespace ProConnect.Application.Service
                     message = "Checkout session has been created successfully."
                 };
             }
+            // BUG-05 fix: Stripe.net's StripeException.Message can carry Stripe-internal detail (API key
+            // fragments, internal object ids, account/rate-limit specifics) - letting it fall through to
+            // the generic `catch (Exception ex) { throw; }` below meant ExceptionHandlingMiddleware put
+            // that raw text straight into the client-facing `errormessage`. Caught specifically here (and
+            // in PurchaseConsumable/CancelSubscription) so the client gets a generic, safe message while
+            // the real exception is still logged server-side for debugging.
+            catch (StripeException ex)
+            {
+                _logger.LogError(ex, $"Checkout failed for userid '{userid}' due to a payment provider error.");
+                return new ProConnectResponse<CheckoutResponse>
+                {
+                    issuccessfull = false,
+                    errormessage = "Payment provider error, please try again later.",
+                    message = "Payment provider error, please try again later."
+                };
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Checkout failed for userid '{userid}'.");
@@ -198,6 +215,17 @@ namespace ProConnect.Application.Service
                     message = "Checkout session has been created successfully."
                 };
             }
+            // BUG-05 fix: see the matching catch in Checkout above.
+            catch (StripeException ex)
+            {
+                _logger.LogError(ex, $"PurchaseConsumable failed for userid '{userid}' due to a payment provider error.");
+                return new ProConnectResponse<CheckoutResponse>
+                {
+                    issuccessfull = false,
+                    errormessage = "Payment provider error, please try again later.",
+                    message = "Payment provider error, please try again later."
+                };
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"PurchaseConsumable failed for userid '{userid}'.");
@@ -216,6 +244,19 @@ namespace ProConnect.Application.Service
                         issuccessfull = false,
                         errormessage = "No active subscription was found.",
                         message = "No active subscription was found."
+                    };
+
+                // BUG-07 fix: without this, a double-cancel (double-click, or a retry after a
+                // slow/timed-out first request) unconditionally fell through to the live
+                // _paymentGateway.CancelSubscription call below against a subscription Stripe already
+                // considers canceled, which throws and (pre-BUG-05-fix) surfaced as a raw 500. Short-
+                // circuiting here makes a repeat cancel idempotent instead of erroring, and skips an
+                // unnecessary live call to Stripe for a subscription that's already gone there too.
+                if (subscription.status == SubscriptionStatus.Canceled)
+                    return new ProConnectResponse<string>
+                    {
+                        body = "ok",
+                        message = "Subscription is already canceled."
                     };
 
                 await _paymentGateway.CancelSubscription(subscription.stripe_subscription_id, at_period_end);
@@ -241,6 +282,17 @@ namespace ProConnect.Application.Service
                         : "Your subscription has been canceled."
                 };
             }
+            // BUG-05 fix: see the matching catch in Checkout above.
+            catch (StripeException ex)
+            {
+                _logger.LogError(ex, $"CancelSubscription failed for userid '{userid}' due to a payment provider error.");
+                return new ProConnectResponse<string>
+                {
+                    issuccessfull = false,
+                    errormessage = "Payment provider error, please try again later.",
+                    message = "Payment provider error, please try again later."
+                };
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"CancelSubscription failed for userid '{userid}'.");
@@ -250,9 +302,35 @@ namespace ProConnect.Application.Service
 
         public async Task<ProConnectResponse<string>> HandleWebhook(string payload, string stripe_signature_header)
         {
+            PaymentWebhookEvent webhookEvent;
+
+            // BUG-06 fix: ParseWebhookEvent throws Stripe.StripeException on a bad/missing/unconfigured
+            // Stripe-Signature header. This used to fall through to the generic `catch (Exception ex) {
+            // throw; }` further down, which ExceptionHandlingMiddleware maps to a 500 - despite the
+            // controller's own (now-corrected) doc comment having at one point claimed this came back as
+            // a 400. Caught here, before the normal processing try/catch, specifically so a bad signature
+            // gets a real 400: Stripe's retry/alerting behavior treats 4xx as "don't retry, bad request"
+            // and 5xx as "retry, treat as the receiver's outage" - a signature mismatch is the former, not
+            // the latter, and shouldn't trip server-error alerting or cause Stripe to keep retrying an
+            // event that will never verify.
             try
             {
-                var webhookEvent = _paymentGateway.ParseWebhookEvent(payload, stripe_signature_header);
+                webhookEvent = _paymentGateway.ParseWebhookEvent(payload, stripe_signature_header);
+            }
+            catch (StripeException ex)
+            {
+                _logger.LogWarning(ex, "SubscriptionService.HandleWebhook rejected a webhook with a bad/missing Stripe-Signature.");
+                return new ProConnectResponse<string>
+                {
+                    statuscode = 400,
+                    issuccessfull = false,
+                    errormessage = "Invalid webhook signature.",
+                    message = "Invalid webhook signature."
+                };
+            }
+
+            try
+            {
 
                 // Idempotency - a Stripe retry (anything but a 2xx response) must never double-apply, e.g.
                 // double-crediting a consumable - see PaymentTransactionEntity remarks.
@@ -406,6 +484,25 @@ namespace ProConnect.Application.Service
 
             await _subscriptionRepository.UpsertUserSubscription(subscription);
             await _featureGateService.InvalidateEffectivePlan(subscription.userid);
+
+            // SUB-09 fix: this handler used to be the only webhook handler that never called
+            // CreateTransaction, so HandleWebhook's TransactionExistsByStripeEventId idempotency guard had
+            // nothing to find on a replayed customer.subscription.updated/.deleted event and always fell
+            // through to full reprocessing - observed live as two duplicate SubscriptionCanceled
+            // notifications from a single replayed event id. This status-change event has no monetary
+            // amount of its own (amount 0), but writing a row here is what makes it a member of the same
+            // idempotency ledger as every other webhook-driven write - see BUGS_FOUND.md.
+            await _subscriptionRepository.CreateTransaction(new PaymentTransaction
+            {
+                userid = subscription.userid,
+                type = PaymentTransactionType.Subscription,
+                description = $"Subscription status changed to {subscription.status}",
+                amount = 0,
+                currency = "usd",
+                status = evt.payment_status,
+                stripe_event_id = evt.stripe_event_id,
+                created_at_utc = DateTime.UtcNow
+            });
 
             // Only the customer.subscription.deleted path (fallbackStatus Canceled) realistically lands
             // here with a Canceled status - customer.subscription.updated's own fallback is PastDue, which

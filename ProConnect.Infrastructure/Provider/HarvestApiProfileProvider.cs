@@ -52,7 +52,49 @@ namespace ProConnect.Infrastructure.Provider
                 _config.apitoken);
 
             var profile = results?.FirstOrDefault();
-            return profile is null ? null : MapToPersonProfile(profile);
+
+            if (profile is null)
+                return null;
+
+            // BUG-09 fix: the actor can return a dataset item that isn't actually a hit for what was
+            // asked - either a "not found" placeholder/stub with every identity field empty, or (observed
+            // live) a completely unrelated real profile. Accepting either silently used to let a signup
+            // report success while persisting an empty or misattributed account - see BUGS_FOUND.md
+            // BUG-09. Treating a rejected item the same as a null FirstOrDefault (return null) also means
+            // it's never handed to Cache.Get as a value to cache (see Cache.Get remarks - only non-null
+            // results get cached), so a transient scraper miss can't permanently poison
+            // CacheRegion.PERSONPROFILE for this identifier.
+            if (!IsPlausibleMatch(profile, publicIdentifierOrUrl))
+            {
+                _logger.LogWarning(
+                    "HarvestApiProfileProvider.GetProfile rejected a mismatched/empty result for requested identifier '{Requested}' (returned PublicIdentifier '{Returned}', FirstName '{FirstName}', LastName '{LastName}').",
+                    publicIdentifierOrUrl, profile.PublicIdentifier, profile.FirstName, profile.LastName);
+                return null;
+            }
+
+            return MapToPersonProfile(profile);
+        }
+
+        // A valid hit needs (a) *some* core identity data at all - a not-found stub comes back with
+        // FirstName/LastName/PublicIdentifier all empty - and (b), when the actor did echo a
+        // PublicIdentifier, that it's actually related to what was requested. requestedIdentifierOrUrl may
+        // be a bare identifier ("sherylsandberg") or a full profile URL
+        // ("https://www.linkedin.com/in/sherylsandberg/"), so a case-insensitive substring check in either
+        // direction covers both without needing to parse URLs.
+        private static bool IsPlausibleMatch(HarvestApiProfileResult profile, string requestedIdentifierOrUrl)
+        {
+            var hasCoreIdentity = !string.IsNullOrWhiteSpace(profile.FirstName)
+                || !string.IsNullOrWhiteSpace(profile.LastName)
+                || !string.IsNullOrWhiteSpace(profile.PublicIdentifier);
+
+            if (!hasCoreIdentity)
+                return false;
+
+            if (string.IsNullOrWhiteSpace(profile.PublicIdentifier) || string.IsNullOrWhiteSpace(requestedIdentifierOrUrl))
+                return true;
+
+            return requestedIdentifierOrUrl.Contains(profile.PublicIdentifier, StringComparison.OrdinalIgnoreCase)
+                || profile.PublicIdentifier.Contains(requestedIdentifierOrUrl, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>

@@ -341,9 +341,44 @@ namespace ProConnect.Application.Service
                         message = "You cannot swipe on yourself."
                     };
 
+                // BUG-03 fix: GetById is_active-filtered (same as GetCandidates), so this also rejects
+                // swiping on a deactivated user, not just a never-existed one - either way there's no
+                // profile to actually swipe on, and the old code let this fall through to RecordSwipe's FK
+                // constraint, which raised a raw Npgsql 23503 foreign-key-violation 500 instead of a clean
+                // error.
+                var targetProfile = await _userRepository.GetById(targetUserId);
+                if (targetProfile is null)
+                    return new ProConnectResponse<SwipeResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Target user not found.",
+                        message = "Target user not found."
+                    };
+
+                // BUG-08 fix: GetCandidates/GetIncomingLikes/GetPassedCandidates already excluded blocked
+                // pairs from ever being *shown*, but a client that already had a blocked user's id (e.g.
+                // from before the block was placed, or a replayed/forged request) could still swipe on
+                // them directly - this closes that gap with the same mutual-blocking semantics.
+                if (await _matchRepository.IsBlockedEitherDirection(userid, targetUserId))
+                    return new ProConnectResponse<SwipeResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "You can't swipe on this user.",
+                        message = "You can't swipe on this user."
+                    };
+
                 // Daily like cap (see Const.FeatureKey.DailyLikes) only applies to Likes - Pass is always
                 // free and unmetered. Checked (and, on success, incremented) before RecordSwipe so a
                 // denied like never gets persisted.
+                //
+                // BUG-04/BUG-11 fix: this consume is optimistic - it happens before we know whether
+                // RecordSwipe's write is actually a net-new Like (as opposed to a repeat Like already on
+                // record for this exact pair). We can't check that first without reopening the same race
+                // (two concurrent identical Like calls could both observe "not yet liked" before either
+                // writes), so instead RecordSwipe itself resolves this race-free (via an advisory lock -
+                // see MatchRepository) and tells us whether it was genuinely new; if it wasn't, we
+                // refund the unit we optimistically charged. A denied Like still never gets persisted,
+                // since TryConsume runs (and can short-circuit) before RecordSwipe is ever called.
                 if (action == SwipeAction.Like)
                 {
                     var consumeResult = await _featureGateService.TryConsume(userid, FeatureKey.DailyLikes);
@@ -358,7 +393,22 @@ namespace ProConnect.Application.Service
                         };
                 }
 
-                await _matchRepository.RecordSwipe(userid, targetUserId, action);
+                var (wasNewLike, previousAction) = await _matchRepository.RecordSwipe(userid, targetUserId, action);
+
+                // Re-Like of an already-Like row (BUG-11): we just optimistically charged above but
+                // RecordSwipe says this wasn't actually a new Like, so give the unit back.
+                if (action == SwipeAction.Like && !wasNewLike)
+                    await _featureGateService.RefundConsumption(userid, FeatureKey.DailyLikes);
+
+                // Like -> non-Like (BUG-04): the original Like's row just got overwritten by this Pass
+                // (or any other non-Like action), erasing the evidence that justified its quota charge.
+                // No consume happens on this call (only Like consumes), so without this the charge from
+                // the earlier Like would stick around forever with no corresponding Like row to reconcile
+                // against - used_count silently drifting above COUNT(*) FROM swipes WHERE action = Like.
+                // Refunding here keeps the two in sync regardless of how many times a user flips their
+                // swipe on the same target.
+                if (action != SwipeAction.Like && previousAction == SwipeAction.Like)
+                    await _featureGateService.RefundConsumption(userid, FeatureKey.DailyLikes);
 
                 if (action != SwipeAction.Like)
                     return new ProConnectResponse<SwipeResponse>
@@ -370,9 +420,18 @@ namespace ProConnect.Application.Service
                 var targetAlreadyLikedUser = await _matchRepository.HasLiked(targetUserId, userid);
                 if (!targetAlreadyLikedUser)
                 {
-                    // Fires for every like regardless of subscriber tier - see NotifyNewLike remarks for why
-                    // this stays deliberately generic (no liker identity) despite that.
-                    await NotifyNewLike(targetUserId);
+                    // Found during BUG-11 reverification: NotifyNewLike used to fire on every Like call
+                    // that reaches this branch, including a re-Like of a target already Liked (wasNewLike
+                    // false) - so N concurrent/duplicate Like taps on the same never-reciprocated target
+                    // (a double-tap, a flaky-network retry, the exact BUG-11 race scenario) produced N
+                    // duplicate "someone liked you" notifications for what is, and should remain, a single
+                    // event. Gating on wasNewLike makes this consistent with the quota-refund gating just
+                    // above: a re-Like is a no-op in every observable way, not just for billing.
+                    //
+                    // Fires for every *new* like regardless of subscriber tier - see NotifyNewLike remarks
+                    // for why this stays deliberately generic (no liker identity) despite that.
+                    if (wasNewLike)
+                        await NotifyNewLike(targetUserId);
 
                     return new ProConnectResponse<SwipeResponse>
                     {
@@ -381,9 +440,16 @@ namespace ProConnect.Application.Service
                     };
                 }
 
-                var matchId = await _matchRepository.CreateMatch(userid, targetUserId);
+                var (matchId, created) = await _matchRepository.CreateMatch(userid, targetUserId);
 
-                await NotifyNewMatch(userid, targetUserId, matchId);
+                // BUG-12 fix: only notify when this call actually created the match - CreateMatch is
+                // idempotent and race-safe (advisory lock on the canonicalized pair - see MatchRepository),
+                // so when both sides' reciprocal Like land at nearly the same time, exactly one of the two
+                // Swipe calls sees created == true and fires the notification; the other sees the
+                // already-existing match and skips it, instead of both firing and producing duplicate
+                // "It's a match!" notifications for the same pair - reproduced in BUGS_FOUND.md BUG-12.
+                if (created)
+                    await NotifyNewMatch(userid, targetUserId, matchId);
 
                 return new ProConnectResponse<SwipeResponse>
                 {

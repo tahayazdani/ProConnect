@@ -41,5 +41,16 @@ namespace ProConnect.Application.Interface
         /// visible on the very next check rather than waiting out CacheExpiry.EffectivePlan.
         /// </summary>
         Task InvalidateEffectivePlan(Guid userid);
+
+        /// <summary>
+        /// Gives back `amount` units of a counted feature previously spent via TryConsume, for the case
+        /// where the caller optimistically consumed before finding out the action it was gating turned out
+        /// not to be the "real" (billable) thing after all - e.g. MatchService.Swipe consumes a DailyLikes
+        /// unit before recording the swipe (so a denied Like is never persisted - see TryConsume remarks),
+        /// then refunds it here if the swipe turned out to be a repeat Like already on record rather than a
+        /// net-new one (see BUGS_FOUND.md BUG-04/BUG-11). A no-op if the feature isn't a counted one (or
+        /// isn't enabled at all) for this user - nothing to refund in that case.
+        /// </summary>
+        Task RefundConsumption(Guid userid, string feature_key, int amount = 1);
     }
 }

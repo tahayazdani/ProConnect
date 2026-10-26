@@ -73,15 +73,84 @@ namespace ProConnect.Application.Service
                         message = "Request body is required."
                     };
 
-                // check in db , if the user is NOT exist
-
+                // BUG-01 fix: reject a duplicate signup for a sub that already has an account
+                // (active or deactivated - GetBySubForAuthentication is unfiltered by is_active,
+                // which is exactly what we want here: a deactivated user should sign back in via
+                // LinkedInAuthentication, not create a second row) with a clean error instead of
+                // letting it fall through to a raw Npgsql 23505 unique-violation 500.
+                if (!string.IsNullOrEmpty(request.sub))
+                {
+                    var existingUser = await _userRepository.GetBySubForAuthentication(request.sub);
+                    if (existingUser is not null)
+                        return new ProConnectResponse<SignUpResponse>
+                        {
+                            issuccessfull = false,
+                            errormessage = "A user with this account already exists. Please sign in instead.",
+                            message = "A user with this account already exists. Please sign in instead."
+                        };
+                }
 
                 // FetchLinkedInProfile caches the raw scrape result itself, so repeat signups (or a
                 // GetLinkedInProfile lookup) for the same identifier don't hit the paid scraper API again
                 var profileResponse = await FetchLinkedInProfile(request.public_identifier);
 
+                // BUG-09 fix (follow-up discovered during reverification): a null profileResponse means
+                // either the actor returned zero dataset items at all, or HarvestApiProfileProvider.GetProfile
+                // itself rejected a mismatched/empty hit (IsPlausibleMatch). Both are the exact same
+                // user-facing situation as the "empty core identity" case just below (which only fires when
+                // profileResponse is non-null) - so this needs the same clean rejection response, not a thrown
+                // InvalidOperationException. Throwing here used to escape to the generic catch below and
+                // surface as a 500 with the raw exception text leaked into errormessage, which is exactly the
+                // kind of information disclosure / unclean-error pattern BUG-09 was about in the first place.
                 if (profileResponse is null)
-                    throw new InvalidOperationException($"LinkedIn profile could not be retrieved for '{request.public_identifier}'.");
+                {
+                    _logger.LogWarning(
+                        "SignUp could not retrieve any LinkedIn profile for requested public_identifier '{Requested}'.",
+                        request.public_identifier);
+
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "We couldn't retrieve a valid LinkedIn profile for this identifier. Please check it and try again.",
+                        message = "We couldn't retrieve a valid LinkedIn profile for this identifier. Please check it and try again."
+                    };
+                }
+
+                // BUG-09 fix (defense in depth): HarvestApiProfileProvider.GetProfile now rejects a
+                // mismatched/empty scrape result itself (returning null, which is already handled above),
+                // but this stays as a second line of defense against any IProfileProvider implementation -
+                // today's or a future one - that doesn't do that filtering. A profile with no usable name
+                // at all is never worth silently persisting as a "successful" signup - see BUGS_FOUND.md
+                // BUG-09 (the "billgates"/"tobiasluetke"/"stewartbutterfield" empty-profile cases).
+                if (string.IsNullOrWhiteSpace(profileResponse.first_name)
+                    && string.IsNullOrWhiteSpace(profileResponse.last_name)
+                    && string.IsNullOrWhiteSpace(profileResponse.full_name))
+                {
+                    _logger.LogWarning(
+                        "SignUp rejected an empty/incomplete scraped profile for requested public_identifier '{Requested}' (returned public_identifier '{Returned}').",
+                        request.public_identifier, profileResponse.public_identifier);
+
+                    return new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "We couldn't retrieve a valid LinkedIn profile for this identifier. Please check it and try again.",
+                        message = "We couldn't retrieve a valid LinkedIn profile for this identifier. Please check it and try again."
+                    };
+                }
+
+                // Observability only (not a rejection) - HarvestApiProfileProvider already validated
+                // relatedness between the requested identifier and what it returned before handing this
+                // back, so a mismatch here would be surprising; logging it means a future regression in
+                // that validation is caught quickly instead of silently persisting the wrong identity
+                // again (the original "Andy Gu" case from BUG-09's discovery).
+                if (!string.IsNullOrWhiteSpace(profileResponse.public_identifier)
+                    && !string.IsNullOrWhiteSpace(request.public_identifier)
+                    && !string.Equals(profileResponse.public_identifier, request.public_identifier, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "SignUp: scraped public_identifier '{Returned}' differs from requested '{Requested}'.",
+                        profileResponse.public_identifier, request.public_identifier);
+                }
 
                 // set gender, date of birth and email address - applied on every call, not cached, so a
                 // later signup for the same identifier with different request data isn't silently stuck
@@ -242,19 +311,43 @@ namespace ProConnect.Application.Service
                     $"client_id={_proConnectConfig.linkedInApplicationConfig.client_id}&" +
                     $"client_secret={_proConnectConfig.linkedInApplicationConfig.client_secret}";
 
-                var tokenResponse = await _httpClientUtilities.PostAsync<TokenResponse>(tokenPath, new object { });
+                // BUG-02 fix: a genuinely bad/expired code or state makes LinkedIn's token
+                // endpoint (or, less commonly, the userinfo endpoint once a bad/expired token
+                // slips through) respond with a non-2xx HTTP status. IHttpClientUtilities throws
+                // on that (PostAsync: a generic Exception; GetAsync->EnsureSuccessStatusCode: an
+                // HttpRequestException) *before* either of the existing "200 OK but empty
+                // token/sub" clean-error checks below ever runs. Wrapping just these two calls
+                // turns that into the same clean "LinkedIn authentication failed" shape instead
+                // of an unhandled 500, without swallowing unrelated exceptions from the rest of
+                // this method.
+                TokenResponse tokenResponse;
+                SignInResponse userInfoResponse;
+                try
+                {
+                    tokenResponse = await _httpClientUtilities.PostAsync<TokenResponse>(tokenPath, new object { });
 
-                if (tokenResponse is null || string.IsNullOrEmpty(tokenResponse.access_token))
+                    if (tokenResponse is null || string.IsNullOrEmpty(tokenResponse.access_token))
+                        return new ProConnectResponse<SignInResponse>
+                        {
+                            issuccessfull = false,
+                            errormessage = "Failed to obtain an access token from LinkedIn.",
+                            message = "Failed to obtain an access token from LinkedIn."
+                        };
+
+                    // call userinfo endpoint to pull user's lite profile
+                    var userInfoPath = $"{_proConnectConfig.linkedInApplicationConfig.linkedin_api_baseurl}";
+                    userInfoResponse = await _httpClientUtilities.GetAsync<SignInResponse>(userInfoPath, _proConnectConfig.linkedInApplicationConfig.linkedin_userinfopath, tokenResponse.access_token);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "LinkedIn token exchange or userinfo call returned a non-2xx response (likely a bad/expired code or state).");
                     return new ProConnectResponse<SignInResponse>
                     {
                         issuccessfull = false,
-                        errormessage = "Failed to obtain an access token from LinkedIn.",
-                        message = "Failed to obtain an access token from LinkedIn."
+                        errormessage = "LinkedIn authentication failed. Please try signing in again.",
+                        message = "LinkedIn authentication failed. Please try signing in again."
                     };
-
-                // call userinfo endpoint to pull user's lite profile
-                var userInfoPath = $"{_proConnectConfig.linkedInApplicationConfig.linkedin_api_baseurl}";
-                var userInfoResponse = await _httpClientUtilities.GetAsync<SignInResponse>(userInfoPath, _proConnectConfig.linkedInApplicationConfig.linkedin_userinfopath, tokenResponse.access_token);
+                }
 
                 if (userInfoResponse is null || string.IsNullOrEmpty(userInfoResponse.sub))
                     return new ProConnectResponse<SignInResponse>

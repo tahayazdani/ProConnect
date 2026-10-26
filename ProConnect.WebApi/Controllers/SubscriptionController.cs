@@ -80,16 +80,13 @@ namespace ProConnect.WebApi.Controllers
         /// IPaymentGateway.ParseWebhookEvent via EventUtility.ConstructEvent) is computed over the exact
         /// raw bytes Stripe sent - any JSON re-serialization in between would break verification.
         ///
-        /// A bad/missing/unconfigured signature throws StripeException out of ParseWebhookEvent, which -
-        /// confirmed by live testing, not just assumed - is caught by the same generic, type-agnostic
-        /// ExceptionHandlingMiddleware every other endpoint in this API shares, so it currently comes back
-        /// as a 500 (ErrorCode.SYSTEM), not a 400; there is no 4xx path anywhere in this codebase today.
-        /// That's still a non-2xx, so Stripe still retries - the original "400 so Stripe retries" framing
-        /// in an earlier version of this comment was aspirational and never actually true. Deliberately
-        /// left alone rather than threading a Stripe-specific exception type (or a new generic exception-
-        /// to-statuscode convention) through ExceptionHandlingMiddleware, since IPaymentGateway's whole
-        /// point is confining every Stripe SDK type to StripePaymentGateway - revisit only if 500-vs-400
-        /// actually starts to matter for monitoring/alerting.
+        /// A bad/missing/unconfigured signature throws StripeException out of ParseWebhookEvent.
+        /// BUGS_FOUND.md BUG-06 fix: SubscriptionService.HandleWebhook now catches StripeException
+        /// specifically around that call and returns a ProConnectResponse with statuscode = 400 (this
+        /// action just forwards whatever statuscode the service set, as usual), instead of letting it fall
+        /// through to the generic ExceptionHandlingMiddleware 500 an earlier version of this comment
+        /// (incorrectly) described as intentional. Stripe's retry/alerting treats 4xx as "don't retry, bad
+        /// request" and 5xx as "retry, our outage" - a signature mismatch is the former.
         /// </summary>
         [HttpPost]
         [Route("webhook")]

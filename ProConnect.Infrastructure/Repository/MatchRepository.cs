@@ -171,11 +171,34 @@ namespace ProConnect.Infrastructure.Repository
             return query;
         }
 
-        public async Task RecordSwipe(Guid userid, Guid targetUserId, SwipeAction action)
+        // BUG-11 fix: wrapped in a transaction holding a Postgres advisory lock keyed to this exact ordered
+        // (userid, targetUserId) pair, so two simultaneous identical Like calls (e.g. a double-tap/retry
+        // racing itself) can't both read "no existing row yet" and both report a brand-new Like back to
+        // the caller - reproduced in BUGS_FOUND.md BUG-11 as both calls' feature-gate quota getting charged
+        // for what was really a single Like. pg_advisory_xact_lock is transaction-scoped: Postgres releases
+        // it automatically on commit or rollback (including if the connection is simply returned to the
+        // pool), so there's no separate unlock step to forget. The return value tells MatchService.Swipe
+        // whether this call was a genuine new Like (as opposed to a repeat Like already on record, or any
+        // Pass) - see BUG-11 - and what the swipe's previous action was (null if there wasn't one), which
+        // MatchService.Swipe needs to detect the *other* direction of BUG-04: a Like row being overwritten
+        // by a later Pass (the "upsert destroys the original Like's evidence, quota charge never reversed"
+        // scenario). Returning both lets the caller keep used_count reconciled with
+        // COUNT(*) FROM swipes WHERE action = Like regardless of which direction the swipe changed.
+        public async Task<(bool wasNewLike, SwipeAction? previousAction)> RecordSwipe(Guid userid, Guid targetUserId, SwipeAction action)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
+            var lockKey = (long)HashCode.Combine(userid, targetUserId);
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockKey})");
 
             var entity = await db.Swipes.FirstOrDefaultAsync(s => s.userid == userid && s.targetuserid == targetUserId);
+            var previousAction = entity?.action;
+
+            // Only a transition into Like that wasn't already on record counts as a new Like - a repeat
+            // Like on an existing Like row, or any Pass, is not.
+            var wasNewLike = action == SwipeAction.Like && previousAction != SwipeAction.Like;
+
             if (entity is null)
             {
                 entity = new SwipeEntity { userid = userid, targetuserid = targetUserId };
@@ -186,6 +209,9 @@ namespace ProConnect.Infrastructure.Repository
             entity.swiped_at_utc = DateTime.UtcNow;
 
             await db.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return (wasNewLike, previousAction);
         }
 
         public async Task<bool> HasLiked(Guid likerUserId, Guid targetUserId)
@@ -196,9 +222,25 @@ namespace ProConnect.Infrastructure.Repository
                 .AnyAsync(s => s.userid == likerUserId && s.targetuserid == targetUserId && s.action == SwipeAction.Like);
         }
 
-        public async Task<Guid> CreateMatch(Guid userIdA, Guid userIdB)
+        // BUG-12 fix: wrapped in a transaction holding a Postgres advisory lock canonicalized on the
+        // *unordered* pair (sort the two ids first) so CreateMatch(A, B) and CreateMatch(B, A) - e.g. both
+        // sides' reciprocal Like landing at the same moment - lock on the same key and serialize against
+        // each other, instead of each racing the other's "check existing, then insert": there's no unique
+        // DB constraint on (userid_a, userid_b) (see MatchEntityConfiguration) to catch that at the
+        // database level, so both could otherwise insert a duplicate match row and both fire a "New
+        // match!" notification - reproduced in BUGS_FOUND.md BUG-12. The `created` flag tells
+        // MatchService.Swipe whether this call actually made a new match (vs. returning one that already
+        // existed) so it only notifies once per pair, not once per caller.
+        public async Task<(Guid matchId, bool created)> CreateMatch(Guid userIdA, Guid userIdB)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
+            var (first, second) = string.CompareOrdinal(userIdA.ToString(), userIdB.ToString()) <= 0
+                ? (userIdA, userIdB)
+                : (userIdB, userIdA);
+            var lockKey = (long)HashCode.Combine(first, second);
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockKey})");
 
             // idempotent - if the pair already matched (in either order), return the existing match instead
             // of creating a duplicate row
@@ -207,7 +249,10 @@ namespace ProConnect.Infrastructure.Repository
                 (m.userid_a == userIdB && m.userid_b == userIdA));
 
             if (existing is not null)
-                return existing.matchid;
+            {
+                await transaction.CommitAsync();
+                return (existing.matchid, false);
+            }
 
             var entity = new MatchEntity
             {
@@ -219,8 +264,23 @@ namespace ProConnect.Infrastructure.Repository
 
             db.Matches.Add(entity);
             await db.SaveChangesAsync();
+            await transaction.CommitAsync();
 
-            return entity.matchid;
+            return (entity.matchid, true);
+        }
+
+        // BUG-08 fix: a direct point check for a specific pair, callable from MatchService.Swipe before
+        // recording a Like/Pass - same mutual-blocking semantics (either direction counts) as the
+        // candidate-list filters below, which already excluded blocked pairs from ever being *shown*; this
+        // closes the gap where a client that already had a blocked user's id (e.g. from before the block,
+        // or a replayed/forged request) could still swipe on them directly - see BUGS_FOUND.md BUG-08.
+        public async Task<bool> IsBlockedEitherDirection(Guid userIdA, Guid userIdB)
+        {
+            await using var db = await _dbContextFactory.CreateDbContextAsync();
+
+            return await db.Blocks.AsNoTracking().AnyAsync(b =>
+                (b.blocker_user_id == userIdA && b.blocked_user_id == userIdB) ||
+                (b.blocker_user_id == userIdB && b.blocked_user_id == userIdA));
         }
 
         // offset/limit page over matched_at_utc-descending order at the DB level - a long-tenured user's

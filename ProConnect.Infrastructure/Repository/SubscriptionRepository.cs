@@ -179,33 +179,34 @@ namespace ProConnect.Infrastructure.Repository
             return entity?.used_count ?? 0;
         }
 
-        // See UserFeatureUsageEntity remarks: plain EF read-then-increment-or-insert, not a Redis atomic
-        // increment (no such primitive in ICache/Cache/RedisCache) or raw SQL upsert (this codebase's
-        // EF Core LINQ-only convention). Callers already checked the limit via GetFeatureUsage first.
+        // BUG-10 fix: this used to be a plain EF read-then-increment-or-insert (see the superseded comment
+        // this replaced, and the still-accurate "no Redis atomic increment primitive" note on
+        // UserFeatureUsageEntity). Under concurrent swipes for the same user/feature/period that pattern
+        // either lost one side's increment (both sides read the same starting count, last SaveChangesAsync
+        // wins) or threw a raw Npgsql 23505 unique-violation when both sides tried to INSERT the same
+        // (userid, feature_key, period_key) row at once - reproduced in BUGS_FOUND.md BUG-10. Postgres's
+        // INSERT ... ON CONFLICT DO UPDATE is a single atomic statement evaluated row-locked at the DB
+        // level, so concurrent callers serialize on the row instead of racing in application memory - the
+        // RETURNING clause hands back the post-increment value in the same statement, no separate read
+        // needed. This is a deliberate, narrow exception to the EF-LINQ-only convention noted on
+        // UserFeatureUsageEntity: there's no other atomic-increment primitive available for this exact race.
+        // Callers already checked the limit via GetFeatureUsage first; TryConsume also uses this (with a
+        // negative amount) to refund a charge that turned out not to correspond to a net-new Like - see
+        // MatchService.Swipe / FeatureGateService remarks for BUG-04/BUG-11.
         public async Task<int> IncrementFeatureUsage(Guid userid, string feature_key, string period_key, int amount = 1)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            var now = DateTime.UtcNow;
 
-            var entity = await db.UserFeatureUsages
-                .FirstOrDefaultAsync(u => u.userid == userid && u.feature_key == feature_key && u.period_key == period_key);
-            if (entity is null)
-            {
-                entity = new UserFeatureUsageEntity
-                {
-                    userid = userid,
-                    feature_key = feature_key,
-                    period_key = period_key,
-                    used_count = 0
-                };
-                db.UserFeatureUsages.Add(entity);
-            }
+            var result = await db.Database.SqlQuery<int>($@"
+                INSERT INTO user_feature_usage (userid, feature_key, period_key, used_count, updated_at_utc)
+                VALUES ({userid}, {feature_key}, {period_key}, {amount}, {now})
+                ON CONFLICT (userid, feature_key, period_key)
+                DO UPDATE SET used_count = user_feature_usage.used_count + EXCLUDED.used_count,
+                              updated_at_utc = EXCLUDED.updated_at_utc
+                RETURNING used_count").ToListAsync();
 
-            entity.used_count += amount;
-            entity.updated_at_utc = DateTime.UtcNow;
-
-            await db.SaveChangesAsync();
-
-            return entity.used_count;
+            return result.Single();
         }
 
         public async Task<int> GetConsumableBalance(Guid userid, string feature_key)

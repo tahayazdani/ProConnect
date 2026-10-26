@@ -73,6 +73,23 @@ namespace ProConnect.Application.Service
             await _cache.Delete(EffectivePlanCacheKey(userid), CacheRegion.EFFECTIVEPLAN);
         }
 
+        // BUG-04/BUG-11 fix: see IFeatureGateService remarks. Reuses the same reset_period -> periodKey
+        // derivation TryConsume/ComputeEffectivePlan use, so the refund lands against the exact same
+        // counter row the original TryConsume call incremented. Deliberately a no-op (not an error) when
+        // the feature isn't a counted one for this user - a caller that already successfully consumed a
+        // unit from it obviously found one to consume, but staying defensive here costs nothing and avoids
+        // a NullReferenceException if entitlements changed between the consume and the refund.
+        public async Task RefundConsumption(Guid userid, string feature_key, int amount = 1)
+        {
+            var effective = await ResolveEffectivePlan(userid);
+
+            if (!effective.features.TryGetValue(feature_key, out var entitlement) || entitlement.reset_period == ResetPeriod.None)
+                return;
+
+            var periodKey = DerivePeriodKey(entitlement.reset_period);
+            await _subscriptionRepository.IncrementFeatureUsage(userid, feature_key, periodKey, -amount);
+        }
+
         private async Task<EffectivePlan> ComputeEffectivePlan(Guid userid)
         {
             var subscription = await _subscriptionRepository.GetUserSubscription(userid);
