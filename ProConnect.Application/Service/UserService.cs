@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using ProConnect.Application.Interface;
 using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
+using ProConnect.Domain.Exception;
 using ProConnect.Domain.Request;
 using ProConnect.Domain.Response;
 using ProConnect.Infrastructure.Interface;
@@ -59,6 +60,15 @@ namespace ProConnect.Application.Service
         // itself already swallows and logs its own failures, so there is nothing to catch here.
         private static void TriggerRecommendationWarmUp(IMatchService matchService, Guid userid) =>
             _ = Task.Run(() => matchService.WarmRecommendations(userid));
+
+        // Postgres's unique index on emailaddress (and every in-code comparison we do against it) is
+        // case-sensitive and whitespace-sensitive by default, but email addresses are not - two users
+        // typing "Test@Example.com" and "test@example.com" are the same mailbox. Normalizing before
+        // every comparison/store (both here and in UserRepository.ToEntity, implicitly, since this is
+        // the only place emailaddress is ever set before being handed to the repository) means the DB
+        // unique index and the proactive duplicate check actually agree with each other.
+        private static string NormalizeEmail(string email) =>
+            string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant();
         public async Task<ProConnectResponse<SignUpResponse>> SignUp(SignUpRequest request)
         {
             var response = new ProConnectResponse<SignUpResponse>();
@@ -87,23 +97,6 @@ namespace ProConnect.Application.Service
                             issuccessfull = false,
                             errormessage = "A user with this account already exists. Please sign in instead.",
                             message = "A user with this account already exists. Please sign in instead."
-                        };
-                }
-
-                // BUG-14 fix: reject a duplicate signup for an email that already has an account (active
-                // or deactivated - GetByEmailForAuthentication is unfiltered by is_active, same rationale
-                // as the sub check above) with a clean error instead of allowing two separate userids to
-                // share one email (which previously succeeded silently, since neither this service nor
-                // the database enforced any uniqueness on emailaddress).
-                if (!string.IsNullOrEmpty(request.email))
-                {
-                    var existingEmailUser = await _userRepository.GetByEmailForAuthentication(request.email);
-                    if (existingEmailUser is not null)
-                        return new ProConnectResponse<SignUpResponse>
-                        {
-                            issuccessfull = false,
-                            errormessage = "A user with this email already exists. Please sign in instead.",
-                            message = "A user with this email already exists. Please sign in instead."
                         };
                 }
 
@@ -173,11 +166,34 @@ namespace ProConnect.Application.Service
                 // later signup for the same identifier with different request data isn't silently stuck
                 // with whichever request happened to populate the cache first
                 profileResponse.userid = Guid.NewGuid();
-                profileResponse.emailaddress = string.IsNullOrEmpty(profileResponse.emailaddress) ? request.email : profileResponse.emailaddress;
+                profileResponse.emailaddress = NormalizeEmail(
+                    string.IsNullOrEmpty(profileResponse.emailaddress) ? request.email : profileResponse.emailaddress);
                 profileResponse.gender = string.IsNullOrEmpty(profileResponse.gender) ? request.gender : profileResponse.gender;
                 profileResponse.birth_date = profileResponse.birth_date is null ?
                                            new date { day = request.birth_date.day, month = request.birth_date.month, year = request.birth_date.year } :
                                            profileResponse.birth_date;
+
+                // BUG-14 fix (corrected): reject a duplicate signup for an email that already has an
+                // account (active or deactivated - GetByEmailForAuthentication is unfiltered by
+                // is_active, same rationale as the sub check above). This must run against
+                // profileResponse.emailaddress - the normalized, *effective* email that is actually
+                // about to be persisted and is what the DB's unique index enforces - not the raw
+                // request.email, because HarvestApi's scrape can supply its own emailaddress
+                // (HarvestApiProfileProvider.cs) which overrides request.email above and would
+                // otherwise let a colliding scraped email sail past this check only to blow up on the
+                // DB unique-constraint insert (or, conversely, wrongly reject a signup whose
+                // request.email collided but whose effective scraped email was actually unique).
+                if (!string.IsNullOrEmpty(profileResponse.emailaddress))
+                {
+                    var existingEmailUser = await _userRepository.GetByEmailForAuthentication(profileResponse.emailaddress);
+                    if (existingEmailUser is not null)
+                        return new ProConnectResponse<SignUpResponse>
+                        {
+                            issuccessfull = false,
+                            errormessage = "A user with this email already exists. Please sign in instead.",
+                            message = "A user with this email already exists. Please sign in instead."
+                        };
+                }
 
                 // save to database
                 // user
@@ -247,6 +263,33 @@ namespace ProConnect.Application.Service
                 // brand-new user is about to land on the swipe deck for the first time - see
                 // TriggerRecommendationWarmUp.
                 TriggerRecommendationWarmUp(_matchService, profileResponse.userid);
+            }
+            catch (DuplicateUserException dupEx)
+            {
+                // Defense-in-depth: the proactive sub/email checks above are check-then-act, so a true
+                // concurrent-request race (two genuinely simultaneous signups for the same new sub/email)
+                // can slip both requests past those checks before either one's insert has committed.
+                // UserRepository.SignUp catches the resulting Postgres 23505 unique-violation and throws
+                // this typed exception instead of letting a raw Npgsql exception escape as an unhandled
+                // 500 - map it back here to the exact same clean message the proactive check would have
+                // returned had the race not occurred.
+                _logger.LogWarning(dupEx,
+                    "SignUp hit a concurrent-signup race on '{ConflictField}' for public_identifier '{Requested}'.",
+                    dupEx.ConflictField, request?.public_identifier);
+
+                return dupEx.ConflictField == "email"
+                    ? new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "A user with this email already exists. Please sign in instead.",
+                        message = "A user with this email already exists. Please sign in instead."
+                    }
+                    : new ProConnectResponse<SignUpResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "A user with this account already exists. Please sign in instead.",
+                        message = "A user with this account already exists. Please sign in instead."
+                    };
             }
             catch (Exception ex)
             {

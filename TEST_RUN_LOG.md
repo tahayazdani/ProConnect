@@ -53,7 +53,7 @@ scrape (live token), Stripe faked via hand-signed webhook payloads against a thr
 | CRITERIA-01 | **PASS** | `PUT /api/match/v1/criteria` (note: real route is `[HttpPut]`, not `POST` — corrected during execution) with city/industry/age/interests → 200; DB insert confirmed via `GET` round-trip. |
 | CRITERIA-02 | **PASS** | Second `PUT` with different values → update in place, not a duplicate row. |
 | CRITERIA-03 | **PASS** | `radius_km` set as a Free-plan user → criteria still saves; `radius_search_enabled` gating verified separately against `IFeatureGateService`. |
-| CRITERIA-04 | **GAP** | `min_age > max_age` (and negative values) are silently accepted — no validator exists for `MatchCriteriaRequest` in code. Documented as a gap, not filed as a numbered bug (cosmetic/data-quality, not a crash or security issue), but worth a validator pass. |
+| CRITERIA-04 | **GAP → FIXED, see 2026-10-26 (follow-up) entry below** | `min_age > max_age` (and negative values) were silently accepted — no validator existed for `MatchCriteriaRequest` in code. New `MatchCriteriaRequestValidator` added and live-reverified; see below for evidence. |
 
 ### 5.4 Finding matches (MATCH)
 
@@ -253,3 +253,81 @@ container and confirmed via `\d users`. `dotnet build ProConnect.sln`: 0 warning
 `/tmp/*email*.json` and log scratch files removed.
 
 **Result: PASS (post-fix).** See `BUGS_FOUND.md` BUG-14 for full root-cause detail.
+
+## 2026-10-26 (follow-up) — BUG-14 correction, BUG-15 (concurrent-race), CRITERIA-04 fix
+
+**Trigger:** direct question ("are there any other untested edge cases?") asked right after the
+BUG-14 fix above shipped. Re-examining that fix's own code turned up a real gap in it (checked the
+wrong field), plus two previously-undocumented gaps: a true concurrent-request race on the same
+`sub`/`email`, and the pre-existing `CRITERIA-04` gap flagged above. All three investigated live
+against the same running `ProConnect.WebApi` (`dotnet run --no-build`, port 5109) and real
+`proconnect-postgres`/`proconnect-redis` containers; scraped-profile inputs controlled by seeding
+the Redis `PersonProfile` cache directly (doubly-nested `CacheItem<CacheItem<T>>` JSON, key =
+`"{region}:" + SHA256(public_identifier).ToUpperHex()`) rather than depending on the real scraper
+for arbitrary throwaway identifiers.
+
+**BUG-14 correction — effective-field mismatch:** the BUG-14 fix above compared the raw
+`request.email` against existing users, but `HarvestApiProfileProvider.MapToPersonProfile` can
+supply its own `emailaddress` that overrides `request.email` before the row is ever persisted — so
+the duplicate check was validating a field that isn't necessarily what gets written to the DB.
+Reproduced live: seeded two cache entries with scraped emails `scraped@example.com` and
+`SCRAPED@Example.com ` (same mailbox once normalized) behind two *different*, non-colliding
+`request.email` values. First signup (`qa-dedup-test-1`-style identifier) succeeded and stored the
+scraped email. Second signup, different non-colliding `request.email` but the same effective
+scraped mailbox, was cleanly rejected post-fix (`"A user with this email already exists..."`);
+`psql` confirmed exactly 1 row for the pair. Fixed by moving the duplicate check in
+`UserService.SignUp` to run against `profileResponse.emailaddress` (the normalized, effective
+value about to be written) instead of `request.email`.
+
+**Email normalization:** neither the original BUG-14 check nor the DB unique index treated
+`"Test@Example.com "` and `"test@example.com"` as the same address. Added a `NormalizeEmail`
+helper (`Trim().ToLowerInvariant()`) applied once at the point `profileResponse.emailaddress` is
+resolved, so the duplicate check, the DB write, and the unique index all agree. Reproduced live:
+signup with `email="Test@Example.com "` stored as `test@example.com` in `users.emailaddress`
+(confirmed via `psql`); a second signup with `" test@example.com"` (different case/whitespace, same
+mailbox) was cleanly rejected, not treated as a new address.
+
+**BUG-15 — true concurrent duplicate signup (new finding):** before this fix, two genuinely
+simultaneous signup requests for the same new `sub` or `email` could both pass
+`UserService.SignUp`'s proactive `GetBySubForAuthentication`/`GetByEmailForAuthentication` check
+(a check-then-act race) before either one's insert committed, and the DB-level unique-constraint
+violation that would then hit on the second insert was an unhandled `Npgsql.PostgresException`
+nested inside EF Core's `DbUpdateException` — a raw HTTP 500, not the clean "already exists"
+response the sequential case gets. This had never been tested (only sequential/non-concurrent
+duplicate signups had been, per BUG-01/BUG-14 above). Fixed with a 3-part defense-in-depth chain:
+new `DuplicateUserException` (Domain layer, carries `ConflictField` = `"sub"` or `"email"`);
+`UserRepository.SignUp` catches `DbUpdateException` wrapping a Postgres `23505` and throws it;
+`UserService.SignUp` catches it and returns the exact same clean message the proactive check
+would have returned had the race not occurred.
+
+Reproduced live via genuinely simultaneous (not sequential) `curl` processes, launched backgrounded
+together and `wait`ed, confirmed via server log lines showing the actual exception-catch path fired
+(not just proactive-check serialization):
+- **Sub-axis:** 3 concurrent signups sharing `sub="qa-race-sub"` (different `public_identifier`s/
+  emails) → 1 succeeded, 2 cleanly rejected. Log: `"SignUp hit a concurrent-signup race on 'sub' for
+  public_identifier 'qa-dedup-test-5'."` and the same for `'...test-7'`.
+- **Email-axis:** 3 concurrent signups sharing a normalized email (case/whitespace variants) across
+  different subs/identifiers → 1 succeeded, 2 cleanly rejected. Log: `"...race on 'email' for
+  public_identifier 'qa-dedup-test-9'."` and `'...test-10'.`
+- **Deactivated-account axis:** signed up `qa-dedup-test-11`, deactivated it (`POST
+  /api/account/v1/deactivate`, confirmed `is_active=f` via `psql`), then attempted a duplicate
+  signup reusing its `sub` (cleanly rejected) and separately reusing its `email` with different
+  casing (cleanly rejected) — confirms deactivated accounts still correctly block duplicate
+  signups through both the proactive check and the race-condition catch.
+
+**CRITERIA-04 fix:** new `MatchCriteriaRequestValidator` (FluentValidation), registered as an
+`IValidator<MatchCriteriaRequest>` singleton in `Program.cs`. Rules: `min_age >= 18` (matching
+`SignUpValidator`'s existing adult-only rule), `max_age <= 120`, `min_age <= max_age` when both are
+supplied, `radius_km > 0`; every rule is `.When(...)`-guarded so an unset field never fires (every
+field on this request is optional). Reproduced live via `PUT /api/match/v1/criteria`:
+`min_age=40,max_age=25` → clean `450`/`VALIDATION` error ("min_age must be less than or equal to
+max_age."); `min_age=-5,max_age=30` → clean `450`/`VALIDATION` error ("min_age must be at least
+18."); `min_age=25,max_age=40` (valid) → still succeeds normally (200, criteria saved) — no
+regression on valid input.
+
+**Build:** `dotnet build ProConnect.sln` — 0 errors (only pre-existing nullable-reference warnings
+plus 2 new benign `CS8629` warnings in the new validator, from `.Value` access already guarded by
+`.When()` but not statically provable to the compiler).
+
+**Result: PASS (post-fix), all three findings.** See `BUGS_FOUND.md`'s BUG-14 follow-up addendum,
+new BUG-15 section, and Notes for full root-cause/fix detail.

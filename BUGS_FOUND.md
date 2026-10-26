@@ -594,14 +594,98 @@ full re-test pass this update is based on.
   `reidhoffman`) both succeeded, and `psql` confirmed both stored a genuine SQL `NULL` (not an
   empty string) in `emailaddress` with no false-positive unique-constraint violation. `dotnet build
   ProConnect.sln`: 0 warnings, 0 errors.
+- **Follow-up (same day, found by asking "are there any other untested edge cases?" after BUG-14
+  shipped) — the BUG-14 check itself validated the wrong field:** `UserService.SignUp` ran its new
+  email-duplicate check against raw `request.email` *before* `FetchLinkedInProfile` was even
+  called, but the value actually persisted (and enforced by `IX_users_emailaddress`) is
+  `profileResponse.emailaddress` - which `HarvestApiProfileProvider.MapToPersonProfile` populates
+  from the scrape's own `Emails` field whenever the scrape returns one, silently overriding
+  `request.email` a few lines later (`profileResponse.emailaddress = string.IsNullOrEmpty(...) ?
+  request.email : profileResponse.emailaddress`). So a scraped email that collided with an
+  existing user could sail past the proactive check (which only looked at `request.email`) and
+  either crash on the DB unique-constraint insert, or - worse - two signups whose *scraped* emails
+  collided but whose *request* emails didn't would both look clean to the old check. Reproduced
+  live by seeding two crafted LinkedIn-profile cache entries with the same scraped
+  `emailaddress` (`scraped@example.com` / `SCRAPED@Example.com `, deliberately differing in case
+  and whitespace) behind two different `request.email` values that did **not** collide
+  (`totallydifferent@example.com` / `unused@example.com`) - the first signup succeeded, the second
+  was correctly rejected only after the fix (`psql` confirmed exactly one row).
+  - **Also fixed in the same change: no email normalization anywhere.** `Test@Example.com ` and
+    `test@example.com` were treated as different emails by both the proactive check and the DB
+    unique index, so case/whitespace variants could each get their own account. Added a
+    `NormalizeEmail` helper (`Trim().ToLowerInvariant()`, null-safe) in `UserService.cs`, applied
+    once at the point `profileResponse.emailaddress` is resolved (covering both the
+    request-supplied and scraped-email branches) so every downstream consumer - the duplicate
+    check, the DB write, the JWT claim - sees the same normalized value. Reproduced live: signing
+    up with `Test@Example.com ` stored `test@example.com` in `users.emailaddress`; a second signup
+    with `" test@example.com"` (different case/whitespace, same mailbox) was correctly rejected as
+    a duplicate.
+  - **Fix:** moved the email-duplicate check to *after* `profileResponse.emailaddress` is resolved
+    and normalized, so it checks the actual effective/persisted value via
+    `GetByEmailForAuthentication(profileResponse.emailaddress)` instead of raw `request.email`.
+  - `dotnet build ProConnect.sln` - 0 errors. See BUG-15 below for the second half of this
+    follow-up pass (the true-concurrency race this same code path had never been tested against).
+
+---
+
+## BUG-15 — True concurrent duplicate signup (same `sub` or `email`) would have crashed with a raw HTTP 500 [FIXED] — found during the same 2026-10-26 follow-up pass as the BUG-14 correction above
+
+- **Where:** `UserRepository.SignUp` (ProConnect.Infrastructure/Repository/UserRepository.cs);
+  `UserService.SignUp` (ProConnect.Application/Service/UserService.cs); new
+  `ProConnect.Domain/Exception/DuplicateUserException.cs`.
+- **Symptom (never previously tested, confirmed live this session):** `UserService.SignUp`'s
+  `sub`/email duplicate checks (BUG-01, BUG-14) are check-then-act: look up, then insert, with no
+  transaction or lock spanning the gap. Two genuinely simultaneous signups for the same new
+  `sub` or `email` can both pass the lookup before either one's insert commits - at which point
+  one insert succeeds and the other hits Postgres's `23505` unique-violation on `IX_users_sub` or
+  `IX_users_emailaddress`. Nothing in the codebase caught that exception type anywhere (confirmed
+  via `grep -rn "23505|PostgresException|DbUpdateException"` - the only hits were comments
+  describing this exact risk, not actual handling code), so it would have escaped as an unhandled
+  HTTP 500 - the same failure shape BUG-01/BUG-10 exist to avoid in their own non-race cases.
+- **Root cause:** No code anywhere translated a Postgres unique-violation on `users` into a clean
+  response; `UserRepository.SignUp` just let `DbUpdateException` propagate straight out of
+  `SaveChangesAsync`.
+- **Impact:** Low-probability but real - two devices/tabs submitting the same brand-new signup at
+  the same instant (e.g. a double-tap, or two LinkedIn OAuth callbacks for the same account
+  racing) would see one clean success and one raw 500 with no actionable message, instead of both
+  seeing a clean outcome.
+- **Fix applied:**
+  1. New `ProConnect.Domain.Exception.DuplicateUserException(string conflictField)` - a plain
+     Domain-layer exception (`ConflictField` is `"sub"`, `"email"`, or `"unknown"`), keeping
+     Npgsql-specific types confined to `UserRepository` and never leaking into `UserService`, the
+     same "seam confinement" convention already used for `IPaymentGateway`/`IPushNotificationGateway`.
+  2. `UserRepository.SignUp` now wraps `SaveChangesAsync` in `try { ... } catch (DbUpdateException
+     ex) when (ex.InnerException is PostgresException pgEx && pgEx.SqlState ==
+     PostgresErrorCodes.UniqueViolation)`, mapping `pgEx.ConstraintName` (`IX_users_sub` /
+     `IX_users_emailaddress`) to `"sub"` / `"email"` and throwing `DuplicateUserException`.
+  3. `UserService.SignUp` gained a `catch (DuplicateUserException dupEx)` block (before the
+     generic `catch (Exception ex)`) that maps `ConflictField` back to the exact same clean
+     message its own proactive check would have returned (`"A user with this account already
+     exists..."` / `"A user with this email already exists..."`), logged via
+     `_logger.LogWarning` so a real production occurrence is visible without being treated as an
+     error.
+- **Reverification (live, genuine concurrency, not simulated):** Fired 3 truly concurrent `POST
+  /api/user/v1/signup` requests (background `curl` processes, same instant) sharing one new `sub`
+  across 3 different `public_identifier`s/emails - exactly one succeeded, the other two got the
+  clean `"account already exists"` message with HTTP 200/`issuccessfull:false`, **not** a 500;
+  server log confirmed both losers actually hit the new `catch (DuplicateUserException)` path
+  (`"SignUp hit a concurrent-signup race on 'sub' for public_identifier 'qa-dedup-test-5/7'"`), not
+  just the proactive check serializing them. Repeated for the `email` axis (3 concurrent requests,
+  one shared new email, 3 different `sub`s/identifiers) with the same result - one success, two
+  clean rejections, both confirmed via server log as genuine `DuplicateUserException` catches, not
+  proactive-check hits. `psql` confirmed exactly one row per race in both cases. `dotnet build
+  ProConnect.sln` - 0 errors.
 
 ---
 
 ## Notes
 
-- Fourteen bugs documented in total (twelve from the original 2026-10-23/24 pass, BUG-13 found
-  during the 2026-10-26 re-verification pass, and BUG-14 found later the same day via a direct
-  question about LinkedIn-email-based duplicate signups). BUG-01 through BUG-04 share one pattern: **missing
+- Fifteen bugs documented in total (twelve from the original 2026-10-23/24 pass, BUG-13 found
+  during the 2026-10-26 re-verification pass, BUG-14 found later the same day via a direct
+  question about LinkedIn-email-based duplicate signups, and BUG-15 found in a same-day follow-up
+  pass prompted by the question "are there any other untested edge cases?" after BUG-14 shipped -
+  that same follow-up pass also caught and corrected a real gap in the BUG-14 fix itself, see the
+  addendum at the end of the BUG-14 entry above). BUG-01 through BUG-04 share one pattern: **missing
   precondition/existence checks (or missing idempotency awareness) before a DB write**, surfaced
   as generic 500s via `ExceptionHandlingMiddleware` instead of clean, specific error responses —
   despite the codebase clearly having the infrastructure for clean errors elsewhere (self-like
@@ -659,7 +743,31 @@ full re-test pass this update is based on.
   had been tested — worth remembering that "every bug found so far was found via X method" does
   not mean X method is exhaustive; it's worth periodically asking "what identity/uniqueness axis
   have we *not* checked yet" even after a thorough pass.
-- **All fourteen bugs are now FIXED and reverified** as of 2026-10-26. Each bug entry above has a
+- BUG-15 is a fifth sibling of the BUG-01/09/10/11/12/13 "needed genuine live reproduction, not
+  just a build-passing state" family, but closest in spirit to BUG-10: a true read-then-write
+  race, not a missing precondition check (the preconditions - BUG-01's and BUG-14's checks - were
+  already present and correct; the gap was that nothing caught the exception on the rare occasion
+  they both raced past those checks anyway). Also notable for *how* it was found: not via bulk
+  load or an HTTP probe, but by directly asking "is there anything about this fix that wasn't
+  tested" immediately after shipping BUG-14 - the same sibling finding (the BUG-14 field-mismatch
+  correction, documented as an addendum to the BUG-14 entry rather than its own bug number since
+  it's a correction to an unreleased-to-production fix from earlier the same day, not an
+  independent defect) came from the exact same question. Recommend treating "what did we *not*
+  test about the fix we just shipped" as a standing follow-up question after every bug fix, not
+  just a one-time exercise.
+- **CRITERIA-04** (`MatchCriteriaRequest.min_age`/`max_age` accepting `min_age > max_age` and
+  negative ages with no validation - flagged as a non-bug gap during the 2026-10-25 pass, never
+  filed as a numbered bug since it was a silent data-quality issue rather than a crash) was also
+  fixed in this same follow-up session: new `MatchCriteriaRequestValidator`
+  (`ProConnect.Application/Validation/MatchCriteriaRequestValidator.cs`), registered in
+  `Program.cs` alongside the other `IValidator<T>` singletons, enforcing `min_age >= 18` (matching
+  `SignUpValidator`'s existing adult requirement), `max_age <= 120`, `min_age <= max_age` when
+  both are supplied, and `radius_km > 0` when supplied - every rule conditioned on the field
+  actually being present, since every field on `MatchCriteriaRequest` is optional. Reverified live
+  against `PUT /api/match/v1/criteria`: `min_age=40,max_age=25` and `min_age=-5` both now return a
+  clean `450`/`VALIDATION` error instead of silently saving; a valid range still saves normally.
+- **All fifteen bugs (plus the CRITERIA-04 validation gap) are now FIXED and reverified** as of
+  2026-10-26. Each bug entry above has a
   "Reverification" subsection naming the exact in-code fix location and the specific live-test or
   bulk/scale-test evidence confirming it holds under real concurrent load, not just a single
   sequential request. The two sub-fixes discovered only during the initial reverification pass

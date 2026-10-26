@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using NetTopologySuite;
 using NetTopologySuite.Geometries;
+using Npgsql;
 using ProConnect.Domain.Const;
+using ProConnect.Domain.Exception;
 using ProConnect.Domain.Request;
 using ProConnect.Domain.Response;
 using ProConnect.Infrastructure.Interface;
@@ -33,7 +35,30 @@ namespace ProConnect.Infrastructure.Repository
 
             var entity = ToEntity(request);
             db.Users.Add(entity);
-            await db.SaveChangesAsync();
+
+            try
+            {
+                await db.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx
+                                                && pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
+            {
+                // Defense-in-depth against a true concurrent-request race: UserService.SignUp's
+                // proactive GetBySubForAuthentication/GetByEmailForAuthentication checks are
+                // check-then-act, so two genuinely simultaneous signups for the same new sub/email can
+                // both pass the check before either one's insert has committed. Translate the resulting
+                // 23505 into a typed exception the Application layer can map back to the same clean
+                // message the proactive check would have returned, instead of letting a raw Npgsql
+                // exception escape through the generic catch as an unhandled 500 (the exact shape
+                // BUG-01/BUG-14's proactive checks exist to avoid in the non-race case).
+                var conflictField = pgEx.ConstraintName switch
+                {
+                    "IX_users_sub" => "sub",
+                    "IX_users_emailaddress" => "email",
+                    _ => "unknown"
+                };
+                throw new DuplicateUserException(conflictField);
+            }
 
             return ToSignUpResponse(entity);
         }
