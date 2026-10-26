@@ -77,6 +77,16 @@ namespace ProConnect.Infrastructure.Repository
             return entity is null ? null : ToDomain(entity);
         }
 
+        // BUG-14 fix: email-equivalent of GetBySubForAuthentication above - deliberately unfiltered by
+        // is_active, so a deactivated user's email still blocks a brand-new duplicate signup.
+        public async Task<UserRequest> GetByEmailForAuthentication(string email)
+        {
+            await using var db = await _dbContextFactory.CreateDbContextAsync();
+
+            var entity = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.emailaddress == email);
+            return entity is null ? null : ToDomain(entity);
+        }
+
         public async Task<UserRequest> Update(UserRequest request)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();

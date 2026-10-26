@@ -843,6 +843,9 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("country"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("country"), new[] { "gin_trgm_ops" });
 
+                    b.HasIndex("emailaddress")
+                        .IsUnique();
+
                     b.HasIndex("full_name");
 
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("full_name"), "gin");

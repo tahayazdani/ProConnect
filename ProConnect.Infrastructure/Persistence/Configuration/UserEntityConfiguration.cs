@@ -19,6 +19,14 @@ namespace ProConnect.Infrastructure.Persistence.Configuration
             // unique in our data (harvestapi identifiers), so indexed but not unique.
             builder.HasIndex(u => u.public_identifier);
 
+            // BUG-14 fix: emailaddress had no index or uniqueness constraint at all, which let two
+            // separate signups silently share one email address (UserService.SignUp's app-level check
+            // above is the primary guard, but this is the last line of defense against a race between two
+            // concurrent requests for the same new email slipping past that check). Same reasoning as the
+            // sub index above: Postgres unique indexes don't treat multiple NULLs as duplicates of each
+            // other, so users who sign up with no email at all are unaffected.
+            builder.HasIndex(u => u.emailaddress).IsUnique();
+
             builder.Property(u => u.location).HasColumnType("geography (Point, 4326)");
             builder.HasIndex(u => u.location).HasMethod("GIST");
 

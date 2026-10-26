@@ -552,10 +552,56 @@ full re-test pass this update is based on.
 
 ---
 
+## BUG-14 — Duplicate signup accepted for an email address that already has an account [FIXED] — found during 2026-10-26 session via direct question about LinkedIn-email duplicate signups
+
+- **Where:** `UserService.SignUp` (ProConnect.Application/Service/UserService.cs); DB schema in
+  `UserEntityConfiguration.cs`.
+- **Symptom (reproduced live):** Two `POST /api/user/v1/signup` requests with different
+  `public_identifier`s (`jeffweiner08`, `reidhoffman`) and no `sub`, but the identical `email`
+  (`duplicate_email_test@example.com`), both returned HTTP 200 / `issuccessfull:true`, creating
+  two fully separate `userid`s that shared one `emailaddress` value in the `users` table (confirmed
+  via direct `psql` query returning both rows).
+- **Root cause:** `UserService.SignUp` only had BUG-01's `sub`-based duplicate check; there was no
+  equivalent check for `email`. `UserEntityConfiguration.cs` had no index or uniqueness constraint
+  of any kind on `emailaddress` either (only `sub` was `.IsUnique()`), so nothing at either layer
+  prevented two accounts from sharing an email address.
+- **Impact:** Same LinkedIn user (or two different signup flows carrying the same email, e.g. a
+  user who changes which LinkedIn profile they authorize against this app) could silently end up
+  with two unrelated accounts/`userid`s, splitting their matches, swipes, and subscription state
+  across both — with no error ever surfaced to let them notice.
+- **Fix direction / fix applied:**
+  1. Added `IUserRepository.GetByEmailForAuthentication(string email)` /
+     `UserRepository.GetByEmailForAuthentication` — the email-equivalent of
+     `GetBySubForAuthentication`, deliberately unfiltered by `is_active` so a deactivated user's
+     email still blocks a new duplicate signup (same rationale as the existing `sub` check).
+  2. Added an app-level check in `UserService.SignUp`, directly mirroring the existing BUG-01
+     `sub` check: `if (!string.IsNullOrEmpty(request.email))` → look up
+     `GetByEmailForAuthentication(request.email)` → if found, return a clean
+     `issuccessfull:false` / `"A user with this email already exists. Please sign in instead."`
+     response instead of proceeding.
+  3. Added a DB-level unique index as defense-in-depth against a race between two concurrent
+     requests for the same new email slipping past the app-level check: `builder.HasIndex(u =>
+     u.emailaddress).IsUnique();` in `UserEntityConfiguration.cs`, applied via new migration
+     `20261026041155_AddUserEmailUniqueIndex`. Postgres unique indexes don't treat multiple `NULL`
+     values as duplicates of each other, so this does not affect users who sign up with no email
+     at all (same precedent already relied on for the `sub` unique index).
+- **Reverification (2026-10-26):** Restarted the compiled API against the patched build + migrated
+  schema. Repeated the exact live reproduction: first signup (`jeffweiner08`,
+  `bug14_retest@example.com`) succeeded normally; second signup (`reidhoffman`, same email)
+  returned `issuccessfull:false` / `"A user with this email already exists. Please sign in
+  instead."` with **no** new row written (confirmed via `psql`: only the first `userid` present).
+  Edge case also verified: two separate signups with no `email` field at all (`satyanadella`,
+  `reidhoffman`) both succeeded, and `psql` confirmed both stored a genuine SQL `NULL` (not an
+  empty string) in `emailaddress` with no false-positive unique-constraint violation. `dotnet build
+  ProConnect.sln`: 0 warnings, 0 errors.
+
+---
+
 ## Notes
 
-- Thirteen bugs documented in total (twelve from the original 2026-10-23/24 pass, plus BUG-13
-  found during the 2026-10-26 re-verification pass). BUG-01 through BUG-04 share one pattern: **missing
+- Fourteen bugs documented in total (twelve from the original 2026-10-23/24 pass, BUG-13 found
+  during the 2026-10-26 re-verification pass, and BUG-14 found later the same day via a direct
+  question about LinkedIn-email-based duplicate signups). BUG-01 through BUG-04 share one pattern: **missing
   precondition/existence checks (or missing idempotency awareness) before a DB write**, surfaced
   as generic 500s via `ExceptionHandlingMiddleware` instead of clean, specific error responses —
   despite the codebase clearly having the infrastructure for clean errors elsewhere (self-like
@@ -605,14 +651,23 @@ full re-test pass this update is based on.
   rather than the Like/match path). This is a reminder that fixing a bug family in one code path
   doesn't guarantee every sibling path was already covered — worth a final idempotency audit
   across all `HandleWebhook` dispatch targets if any new webhook event type is added later.
-- **All thirteen bugs are now FIXED and reverified** as of 2026-10-26. Each bug entry above has a
+- BUG-14 is its own category, distinct from every bug above: a **missing uniqueness guarantee
+  on a user-identity field that isn't the primary auth key**. BUG-01's `sub` check already
+  covered the LinkedIn-OIDC-identity axis; `email` is a second, independent identity axis that
+  had zero protection at either the application or database layer until this fix. Found not
+  through code auditing or bulk/scale testing, but by directly asking whether this specific case
+  had been tested — worth remembering that "every bug found so far was found via X method" does
+  not mean X method is exhaustive; it's worth periodically asking "what identity/uniqueness axis
+  have we *not* checked yet" even after a thorough pass.
+- **All fourteen bugs are now FIXED and reverified** as of 2026-10-26. Each bug entry above has a
   "Reverification" subsection naming the exact in-code fix location and the specific live-test or
   bulk/scale-test evidence confirming it holds under real concurrent load, not just a single
-  sequential request. The two sub-fixes discovered only during this reverification pass (the
-  `UserService.SignUp` empty-profile check under BUG-09, and the `NotifyNewLike` re-Like
+  sequential request. The two sub-fixes discovered only during the initial reverification pass
+  (the `UserService.SignUp` empty-profile check under BUG-09, and the `NotifyNewLike` re-Like
   duplicate-notification gating under BUG-11/12) are documented inline in their parent bugs'
   reverification notes rather than given separate bug numbers, since the current source code
   itself labels them as sub-fixes of those bugs (`"BUG-09 fix (follow-up discovered during
   reverification)"` / `"Found during BUG-11 reverification"`). See `TEST_RUN_LOG.md` for the full
   re-test pass (SIGNUP/AUTH/PROFILE/CRITERIA/MATCH/NOTIF/SUB single-user suite plus the 19-user
-  bulk/scale pass) this update is based on, and `PROJECT_NOTES.md` for the changelog entry.
+  bulk/scale pass, and the dedicated BUG-14 email-duplicate-signup case) this update is based on,
+  and `PROJECT_NOTES.md` for the changelog entries.

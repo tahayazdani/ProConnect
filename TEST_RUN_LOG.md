@@ -215,6 +215,41 @@ concurrent swipe calls to exercise the post-upgrade state) — 338 total concurr
 - **1 new bug found and fixed in the same session** (BUG-13) — found specifically because this
   was a genuine *re-verification* pass (deliberately re-probing idempotency/replay behavior on
   the patched build) rather than a rerun of the exact same original test script.
-- **Cleanup still pending** (tracked separately, not yet performed as of this log entry): the 10
-  synthetic `test-cand-*` DB rows used for the MATCH-11 cap test, the 19-user bulk-pass
-  population, and `/tmp` test artifacts from this session.
+- **Cleanup performed** after this pass: `TRUNCATE users CASCADE` (confirmed 0 rows across every
+  FK-dependent table), the throwaway Stripe webhook secret removed from `dotnet user-secrets`
+  (JWT secrets preserved), the test server process stopped, and all `/tmp` scratch files removed.
+
+## 2026-10-26 — BUG-14: duplicate signup via shared email address
+
+**Trigger:** direct question ("did you also test the duplicate user based on LinkedIn email
+address in signup flow?") surfaced that this specific case had never been tested, despite BUG-01
+already covering the analogous `sub`-based duplicate case. Investigated live rather than by code
+inspection alone.
+
+**Case SIGNUP-14 — duplicate `email`, different `public_identifier`, no `sub`:**
+
+| Step | Request | Result (pre-fix) | Result (post-fix) |
+|---|---|---|---|
+| 1 | `POST /signup` — `public_identifier=jeffweiner08`, `email=<shared>` | 200, new `userid` created | 200, new `userid` created (unchanged — first signup for this email is legitimate) |
+| 2 | `POST /signup` — `public_identifier=reidhoffman`, same `email`, no `sub` | **200, a *second* separate `userid` created sharing the same `emailaddress`** (bug) | **200→ now `issuccessfull:false`, `"A user with this email already exists. Please sign in instead."`, no row written** |
+
+Pre-fix DB check: `SELECT userid, public_identifier, emailaddress FROM users WHERE emailaddress =
+'<shared>'` returned 2 rows. Post-fix: repeating the identical two-call sequence left exactly 1
+row for the shared email.
+
+**Case SIGNUP-14b — edge case, no `email` at all (regression guard):** two signups
+(`satyanadella`, `reidhoffman`), neither carrying an `email` field. Both returned
+`issuccessfull:true`. DB check confirmed both stored a genuine SQL `NULL` (`emailaddress IS NULL
+= true`, not an empty string) with no false-positive unique-constraint violation — the new
+`IX_users_emailaddress` unique index correctly does not treat multiple `NULL`s as duplicates of
+each other, same as the pre-existing `sub` unique index.
+
+**Fix:** `UserService.SignUp` email-duplicate check (mirrors BUG-01's `sub` check) +
+`UserRepository.GetByEmailForAuthentication` + new unique index `IX_users_emailaddress`
+(migration `20261026041155_AddUserEmailUniqueIndex`), applied to the live `proconnect-postgres`
+container and confirmed via `\d users`. `dotnet build ProConnect.sln`: 0 warnings, 0 errors.
+
+**Cleanup:** `TRUNCATE users CASCADE` (0 rows confirmed), test server process stopped, all
+`/tmp/*email*.json` and log scratch files removed.
+
+**Result: PASS (post-fix).** See `BUGS_FOUND.md` BUG-14 for full root-cause detail.

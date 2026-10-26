@@ -20,6 +20,14 @@ namespace ProConnect.Infrastructure.Interface
         /// account (see Reactivate). Every other consumer should keep using GetBySub.
         /// </summary>
         Task<UserRequest> GetBySubForAuthentication(string sub);
+        /// <summary>
+        /// BUG-14 fix: email-equivalent of GetBySubForAuthentication - looks up a user by emailaddress,
+        /// unfiltered by is_active, so UserService.SignUp can reject a duplicate signup for an email that
+        /// already has an account (active or deactivated) before it ever reaches the database. A
+        /// deactivated user's email must not be treated as "available" for a brand-new signup, mirroring
+        /// the sub precedent above.
+        /// </summary>
+        Task<UserRequest> GetByEmailForAuthentication(string email);
         Task<UserRequest> Update(UserRequest request);
         /// <summary>
         /// Temporary, reversible deactivation (is_active = false) - Instagram-style "take a break", NOT a

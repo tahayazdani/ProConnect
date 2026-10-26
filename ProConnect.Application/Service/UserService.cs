@@ -90,6 +90,23 @@ namespace ProConnect.Application.Service
                         };
                 }
 
+                // BUG-14 fix: reject a duplicate signup for an email that already has an account (active
+                // or deactivated - GetByEmailForAuthentication is unfiltered by is_active, same rationale
+                // as the sub check above) with a clean error instead of allowing two separate userids to
+                // share one email (which previously succeeded silently, since neither this service nor
+                // the database enforced any uniqueness on emailaddress).
+                if (!string.IsNullOrEmpty(request.email))
+                {
+                    var existingEmailUser = await _userRepository.GetByEmailForAuthentication(request.email);
+                    if (existingEmailUser is not null)
+                        return new ProConnectResponse<SignUpResponse>
+                        {
+                            issuccessfull = false,
+                            errormessage = "A user with this email already exists. Please sign in instead.",
+                            message = "A user with this email already exists. Please sign in instead."
+                        };
+                }
+
                 // FetchLinkedInProfile caches the raw scrape result itself, so repeat signups (or a
                 // GetLinkedInProfile lookup) for the same identifier don't hit the paid scraper API again
                 var profileResponse = await FetchLinkedInProfile(request.public_identifier);
