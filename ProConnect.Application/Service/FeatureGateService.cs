@@ -57,15 +57,24 @@ namespace ProConnect.Application.Service
 
             var periodKey = DerivePeriodKey(entitlement.reset_period);
 
-            // Live read, not the cached snapshot in `effective` - see class remarks.
-            var currentUsed = await _subscriptionRepository.GetFeatureUsage(userid, feature_key, periodKey);
+            // BUG-17 fix: this used to be a live GetFeatureUsage read, a check against
+            // entitlement.limit_value, and (if it passed) a separate IncrementFeatureUsage write - three
+            // steps, each its own round trip, with no lock held across them. Concurrent callers could all
+            // run the read+check before any of them ran the write, all see the same stale usage count, all
+            // pass, and all increment - overshooting the cap (BUGS_FOUND.md BUG-17). TryIncrementFeatureUsage
+            // folds the check and the write into one atomic, row-locked Postgres statement: it returns the
+            // new usage count if the increment was allowed, or null if applying it would have exceeded
+            // limit_value (in which case no row was written, so usage is unchanged).
+            var newUsed = await _subscriptionRepository.TryIncrementFeatureUsage(userid, feature_key, periodKey, amount, entitlement.limit_value);
 
-            if (entitlement.limit_value.HasValue && currentUsed + amount > entitlement.limit_value.Value)
+            if (newUsed is null)
+            {
+                // Rejected - report the current usage for the error message/UI, same as before.
+                var currentUsed = await _subscriptionRepository.GetFeatureUsage(userid, feature_key, periodKey);
                 return new FeatureConsumeResult { allowed = false, limit = entitlement.limit_value, used = currentUsed };
+            }
 
-            var newUsed = await _subscriptionRepository.IncrementFeatureUsage(userid, feature_key, periodKey, amount);
-
-            return new FeatureConsumeResult { allowed = true, limit = entitlement.limit_value, used = newUsed };
+            return new FeatureConsumeResult { allowed = true, limit = entitlement.limit_value, used = newUsed.Value };
         }
 
         public async Task InvalidateEffectivePlan(Guid userid)

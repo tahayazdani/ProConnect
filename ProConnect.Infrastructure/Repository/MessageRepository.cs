@@ -26,9 +26,20 @@ namespace ProConnect.Infrastructure.Repository
             return await db.Matches.AnyAsync(m => m.matchid == matchId && (m.userid_a == userid || m.userid_b == userid));
         }
 
-        public async Task<Message> SendMessage(Guid matchId, Guid senderUserId, string content)
+        public async Task<Message> SendMessageIfParticipant(Guid matchId, Guid senderUserId, string content)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
+            var lockKey = (long)HashCode.Combine(matchId);
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockKey})");
+
+            var isParticipant = await db.Matches.AnyAsync(m => m.matchid == matchId && (m.userid_a == senderUserId || m.userid_b == senderUserId));
+            if (!isParticipant)
+            {
+                await transaction.CommitAsync();
+                return null;
+            }
 
             var entity = new MessageEntity
             {
@@ -43,6 +54,7 @@ namespace ProConnect.Infrastructure.Repository
 
             db.Messages.Add(entity);
             await db.SaveChangesAsync();
+            await transaction.CommitAsync();
 
             return ToDomain(entity);
         }

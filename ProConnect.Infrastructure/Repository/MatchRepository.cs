@@ -345,22 +345,50 @@ namespace ProConnect.Infrastructure.Repository
             return await db.Matches.CountAsync(m => m.userid_a == userid || m.userid_b == userid);
         }
 
+        // BUG-21 fix: this delete used to run with no lock at all. MessageRepository.SendMessageIfParticipant
+        // checks IsParticipant then inserts a message referencing matchid as an FK; if this delete committed
+        // in between those two steps, the insert's FK reference pointed at a now-gone matches row and threw
+        // an unhandled DbUpdateException, surfacing as a raw 500 (reproduced in BUGS_FOUND.md BUG-21 / G-24).
+        // Fixed the same way as BUG-20: both this delete and SendMessageIfParticipant now take the identical
+        // pg_advisory_xact_lock keyed on matchId before touching the row, so the two operations serialize
+        // instead of racing - whichever one gets there first "wins" and the other sees a consistent state
+        // (either a clean "Match not found." or a message that then gets cascade-deleted along with the
+        // match, never a half-finished insert against a deleted match).
         public async Task<bool> Unmatch(Guid userid, Guid matchId)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
+            var lockKey = (long)HashCode.Combine(matchId);
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockKey})");
 
             // the userid_a/userid_b check is what stops a caller from unmatching a pair they aren't part of
             var deletedCount = await db.Matches
                 .Where(m => m.matchid == matchId && (m.userid_a == userid || m.userid_b == userid))
                 .ExecuteDeleteAsync();
 
+            await transaction.CommitAsync();
             return deletedCount > 0;
         }
 
+        // BUG-20 fix: the pre-existing transaction wrapped the dissolve-match delete and the
+        // check-then-insert together, but held no lock - two genuinely concurrent BlockUser calls for the
+        // same ordered (blockerUserId, blockedUserId) pair could each run their own transaction, each see
+        // alreadyBlocked=false, and each attempt the insert; since (blocker_user_id, blocked_user_id) is
+        // the Blocks table's composite primary key (see BlockEntityConfiguration), the second insert's
+        // SaveChangesAsync would throw an unhandled DbUpdateException wrapping a Postgres 23505 unique
+        // violation, surfacing as a raw 500 instead of the idempotent no-op the alreadyBlocked check was
+        // clearly meant to provide (reproduced in BUGS_FOUND.md BUG-20). Lock is keyed on the *ordered*
+        // pair (not canonicalized/sorted like CreateMatch's) since blocking is directional - A blocking B
+        // and B blocking A are two independent rows (see M10-E3/class remarks on IMatchRepository), so
+        // they must not serialize against each other, only against a duplicate of the exact same call.
         public async Task BlockUser(Guid blockerUserId, Guid blockedUserId)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
             await using var transaction = await db.Database.BeginTransactionAsync();
+
+            var lockKey = (long)HashCode.Combine(blockerUserId, blockedUserId);
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockKey})");
 
             // blocking always tears down any existing connection between the pair, regardless of which
             // side of userid_a/userid_b either party landed on

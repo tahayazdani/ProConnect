@@ -2,10 +2,30 @@
 
 Status key: **OPEN** = confirmed, not yet fixed. **FIXED** = patched and reverified.
 
-**Update 2026-10-26:** All 13 bugs below (BUG-01 through BUG-12, plus BUG-13 found during this
-re-verification pass) are now **FIXED**. See each bug's "Reverification" subsection for the exact
-in-code fix location and the live-test evidence confirming it holds, and `TEST_RUN_LOG.md` for the
-full re-test pass this update is based on.
+**Update 2026-10-26 (live API re-test pass):** All 19 bugs below are now **FIXED**. BUG-01 through
+BUG-15 were fixed and reverified in the prior update; this update adds BUG-16 (webhook NRE on a
+null `api_version`), BUG-17 (daily Like quota cap bypassed under concurrent requests via a
+check-then-write race surviving the BUG-10 fix), BUG-18 (`AdjustConsumableBalance` lost-update/crash
+race, same shape as BUG-10 but in a different table, never covered by BUG-10's own fix or
+reverification), and BUG-19 (genuinely concurrent identical-`stripe_event_id` webhook deliveries
+double-crediting a purchase - distinct from BUG-13's sequential-replay case), all found by actually
+running the live API against real Postgres/Redis and firing genuine concurrent traffic rather than
+relying on prior documentation. See each bug's "Reverification" subsection for the exact in-code
+fix location and the live-test evidence confirming it holds, and `TEST_RUN_LOG.md` for the full
+re-test pass this update is based on.
+
+**Update 2026-10-26 (part 2 - full `ENDPOINT_TEST_CASES.md` execution pass):** Running every case
+in `ENDPOINT_TEST_CASES.md` end-to-end against the live API (UserController, AccountController,
+MatchController, MessageController, NotificationController, SubscriptionController,
+SearchController) found and fixed nine further bugs, BUG-20 through BUG-28, documented below -
+bringing the total to **28 bugs, all FIXED and reverified**. Several test-document-flagged "gaps"
+were also live-confirmed during this pass but deliberately left as-is because they are intentional,
+documented design tradeoffs rather than defects (see "Confirmed-but-not-fixed design tradeoffs"
+in the Notes section below) or, in two cases (G-29/G-30), turned out to already be fixed by the
+prior BUG-19 work - the test document itself is simply stale on those two, not describing a live
+bug. Two factual inaccuracies in `ENDPOINT_TEST_CASES.md` itself were also found (see "Test-document
+inaccuracies found" in the Notes section) and should be corrected in that document, independent of
+any code change. See `TEST_RUN_LOG.md` for the dated entry covering this specific pass.
 
 ---
 
@@ -678,6 +698,511 @@ full re-test pass this update is based on.
 
 ---
 
+## BUG-16 — Webhook payload with a null `api_version` crashes with raw HTTP 500 instead of a clean 400 [FIXED] — found during 2026-10-26 live API re-test
+
+- **Where:** `SubscriptionService.HandleWebhook` (ProConnect.Application/Service/SubscriptionService.cs,
+  ~line 318), specifically the call to `_paymentGateway.ParseWebhookEvent(payload,
+  stripe_signature_header)` and the `catch (StripeException ex)` block immediately above it (the
+  BUG-06 fix's signature-failure handler).
+- **Symptom (reproduced live):** Posting a validly-HMAC-signed webhook envelope whose top-level
+  `api_version` field is `null` (Stripe's own event schema documents this field as nullable, and
+  a hand-crafted/legacy-shaped payload can legitimately omit it) returned a raw HTTP 500
+  (`"Something went wrong, Please call administrator."`) instead of either processing normally or
+  returning the clean 400 the BUG-06 fix established for malformed webhook input.
+- **Root cause:** Stripe.net's `EventUtility.ConstructEvent` (called via its 3-arg overload, so
+  `throwOnApiVersionMismatch` defaults to `true`) unconditionally calls
+  `IsCompatibleApiVersion(eventApiVersion)` to decide whether to throw on an API-version mismatch
+  - and that comparison throws a bare `NullReferenceException` (not a `StripeException`) when
+  `eventApiVersion` is `null`, regardless of the `throwOnApiVersionMismatch` flag's value. Because
+  the only catch block in scope was `catch (StripeException ex)` (the BUG-06 fix), this NRE fell
+  straight through it into the generic `catch (Exception ex) { throw; }` further down, which
+  `ExceptionHandlingMiddleware` maps to a generic 500 - for a payload whose HMAC signature was
+  perfectly valid.
+- **Impact:** A 500 response tells Stripe "this was our outage, please retry" - but this failure
+  is deterministic on the exact same payload and will reproduce identically on every retry
+  Stripe attempts, so the correct response is a 400 ("this request is malformed, don't retry")
+  like the adjacent signature-failure path. Low real-world frequency against modern Stripe
+  (current API versions are never null), but a legitimate risk against replayed/legacy-shaped
+  test fixtures or any future Stripe API migration edge case, and a direct regression of the same
+  "don't surface a 500 for a deterministically-bad webhook payload" guarantee BUG-06 was fixed to
+  provide.
+- **Fix applied:** Added a dedicated `catch (Exception ex)` immediately after the existing
+  `catch (StripeException ex)` block around `ParseWebhookEvent`, narrowly scoped to just that one
+  call (not the whole method), returning the same 400 shape as the signature-failure path
+  (`statuscode = 400`, `issuccessfull = false`, `"Unable to process webhook payload."`), logged via
+  `_logger.LogError` so the underlying NRE is still visible in logs for diagnosis.
+- **Reverification (2026-10-26):** Posted a hand-signed webhook envelope with `api_version: null`
+  (valid HMAC signature) directly against the running API - confirmed HTTP 400 with
+  `"Unable to process webhook payload."`, not a 500; server log shows the NRE caught and logged,
+  not propagated. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-17 — Daily Like quota cap can be bypassed under concurrent requests via a check-then-write race [FIXED] — found during 2026-10-26 live concurrency re-test
+
+- **Where:** `FeatureGateService.TryConsume` (ProConnect.Application/Service/FeatureGateService.cs,
+  previously ~lines 58-68), called from `MatchService.Swipe`'s Like path.
+- **Symptom (reproduced live):** 15 genuinely concurrent `POST /api/match/v1/{targetUserId}/like`
+  requests fired for a Free-plan user sitting exactly at 0/10 of their daily cap (via backgrounded
+  `curl` processes against 15 distinct `qa-race-N` synthetic targets, launched together and
+  `wait`ed) resulted in **more than 10 accepted Likes** before the BUG-10 fix's atomic
+  `IncrementFeatureUsage` upsert was the only protection in place - `user_feature_usage.used_count`
+  overshot the `plan_feature.limit_value` cap of 10.
+- **Root cause:** Even after BUG-10's fix made the increment itself atomic
+  (`IncrementFeatureUsage`'s `INSERT ... ON CONFLICT DO UPDATE SET used_count = used_count +
+  EXCLUDED.used_count`), `TryConsume` still composed the admission-control decision from three
+  separate, non-atomic steps: (1) a live `GetFeatureUsage` read, (2) an in-memory comparison
+  against `entitlement.limit_value`, and (3) - only if the comparison passed - a separate
+  `IncrementFeatureUsage` call. BUG-10 made step 3 safe against *itself* (two concurrent increments
+  can no longer crash or lose an update), but it did nothing to make steps 1-3 atomic *together*:
+  N concurrent callers can all execute step 1 and read the same pre-increment `used_count`, all
+  pass step 2's check against the same stale number, and all proceed to step 3 - each one's
+  increment individually succeeds (thanks to BUG-10's fix), so the cap is overshot by however many
+  callers raced past the check at once, with no error anywhere in the stack.
+- **Impact:** Billing-adjacent - the entire purpose of `plan_feature.limit_value` is to cap a
+  Free-plan user's daily Likes at a number the business has decided is free-tier-appropriate; a
+  client that fires several Likes in a tight burst (normal behavior for a fast swiper, not just
+  adversarial scripting) can exceed that cap with no resistance at all. Same risk profile as
+  BUG-04 (quota-accuracy, billing-adjacent) but more severe: BUG-04 *undercounted* (user-unfavorable
+  only in the sense of wasting quota), this *overcounts* in the user's favor, i.e. directly costs
+  the business its intended free-tier limit.
+- **Fix applied:** New `ISubscriptionRepository.TryIncrementFeatureUsage(userid, feature_key,
+  period_key, amount, limit)` (`SubscriptionRepository.cs`, ~line 229) folds the check and the
+  write into one atomic, row-locked Postgres statement:
+  ```sql
+  INSERT INTO user_feature_usage (userid, feature_key, period_key, used_count, updated_at_utc)
+  SELECT @userid, @feature_key, @period_key, @amount, @now
+  WHERE @limit IS NULL OR @amount <= @limit
+  ON CONFLICT (userid, feature_key, period_key)
+  DO UPDATE SET used_count = user_feature_usage.used_count + @amount, updated_at_utc = @now
+  WHERE @limit IS NULL OR user_feature_usage.used_count + @amount <= @limit
+  RETURNING used_count
+  ```
+  returning the new count if the increment was allowed, or no row at all (mapped to `null`) if
+  applying it would have exceeded `limit` - in which case nothing is written, so usage is
+  unchanged. `FeatureGateService.TryConsume` now calls this directly instead of
+  `GetFeatureUsage`-then-check-then-`IncrementFeatureUsage`; on a `null` result it falls back to a
+  `GetFeatureUsage` read purely to report the current count in the rejection response.
+  `IncrementFeatureUsage` itself is kept (now documented as "unconditional, only safe for
+  callers that don't need a limit enforced atomically with the write") since `RefundConsumption`'s
+  negative-amount credit-back legitimately has no cap to check.
+- **Reverification (2026-10-26):** Reset a Free user's quota and swipe history to a clean
+  `0/10` state for the test's period key, then fired 15 genuinely concurrent Likes against 15
+  distinct `qa-race-N` targets (backgrounded `curl` + `wait`). Result, repeated across 2 full
+  clean re-runs: exactly 10 requests succeed, exactly 5 get a clean "Daily like limit reached"
+  rejection, and `user_feature_usage.used_count` lands at exactly 10 - never more - every time.
+  `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-18 — `AdjustConsumableBalance` loses updates and crashes under concurrency (same shape as BUG-10, different table) [FIXED] — found while reverifying BUG-19 below
+
+- **Where:** `SubscriptionRepository.AdjustConsumableBalance` (ProConnect.Infrastructure/Repository/SubscriptionRepository.cs,
+  previously ~lines 260-280), called from `SubscriptionService.HandleConsumableCheckoutCompleted`
+  on every consumable-purchase webhook.
+- **Symptom (reproduced live):** While probing the webhook-idempotency concurrency scenario that
+  led to BUG-19 below, two concurrent consumable-purchase webhooks for the same user (distinct
+  `stripe_event_id`s, 15-rose bundle each, expected final balance 30) instead produced a final
+  `user_consumable_balance.balance` of **15** (one credit silently lost) on one run, and a raw
+  HTTP 500 (`"An error occurred while saving the entity changes."`) on another run for one of the
+  two requests, with the other succeeding.
+- **Root cause:** `AdjustConsumableBalance` was a plain EF read-then-add-or-insert, the exact same
+  vulnerable shape `IncrementFeatureUsage` had before the BUG-10 fix:
+  ```csharp
+  var entity = await db.UserConsumableBalances.FirstOrDefaultAsync(b => b.userid == userid && b.feature_key == feature_key);
+  if (entity is null) { entity = new UserConsumableBalanceEntity { ... balance = 0 }; db.UserConsumableBalances.Add(entity); }
+  entity.balance += delta;
+  await db.SaveChangesAsync();
+  ```
+  `user_consumable_balance`'s primary key is the composite `(userid, feature_key)` - identical
+  constraint shape to `user_feature_usage`'s `PK_user_feature_usage` that caused BUG-10. Two
+  concurrent credits to a not-yet-existing row both read "no row," both insert, and the second
+  insert throws `23505`; two concurrent credits to an *existing* row both read the same
+  pre-increment `balance` into memory, and the second `SaveChangesAsync()` silently overwrites the
+  first's increment with a stale value - a lost update, no error at all. BUG-10's own fix had only
+  ever touched `IncrementFeatureUsage`; this sibling method in the same file was never covered by
+  that fix or its reverification, because the original BUG-10 bulk/scale pass had no concurrent
+  consumable-purchase traffic in its load plan.
+- **Impact:** Billing-critical and worse than BUG-10's analogous gap: BUG-10 only affected a
+  non-monetary quota counter, but this directly affects a consumable balance a real user paid real
+  money for via Stripe - a lost update here means a customer who was charged for (e.g.) two 15-rose
+  bundles could end up with only 15 roses credited, with no error surfaced to anyone to investigate
+  the discrepancy (the crash variant is actually the *better* of the two outcomes here, since at
+  least one side gets a visible 500 to retry/investigate).
+- **Fix applied:** Rewrote `AdjustConsumableBalance` using the same atomic upsert pattern as the
+  BUG-10/BUG-17 fixes, unconditional (no cap to check, so no `WHERE` guard needed unlike BUG-17's
+  `TryIncrementFeatureUsage`):
+  ```sql
+  INSERT INTO user_consumable_balance (userid, feature_key, balance, updated_at_utc)
+  VALUES (@userid, @feature_key, @delta, @now)
+  ON CONFLICT (userid, feature_key)
+  DO UPDATE SET balance = user_consumable_balance.balance + @delta, updated_at_utc = @now
+  RETURNING balance
+  ```
+- **Reverification (2026-10-26):** Fired two consumable-purchase webhooks for the same user with
+  two different `stripe_event_id`s (distinct logical purchases, not a replay) concurrently, twice
+  in a row - both runs landed at the correct summed balance (30 for two 15-unit credits) with no
+  500s and no lost updates. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-19 — Genuinely concurrent identical-`stripe_event_id` webhook deliveries can both apply their side effect before either is recorded as processed, double-crediting a purchase [FIXED] — found during 2026-10-26 live concurrency re-test; distinct from BUG-13 above despite a similar idempotency theme
+
+- **Where:** `SubscriptionService.HandleWebhook` (ProConnect.Application/Service/SubscriptionService.cs,
+  ~line 303 onward), specifically the gap between the idempotency check
+  (`TransactionExistsByStripeEventId`) and each handler's `CreateTransaction` insert, with
+  unprotected side-effect calls (`AdjustConsumableBalance`, `UpsertUserSubscription`, etc.)
+  sandwiched in between.
+- **Symptom (reproduced live):** BUG-13 above already fixed and verified Stripe's documented
+  *sequential* replay case (a retry/redelivery of the same event, processed one at a time) via
+  `TransactionExistsByStripeEventId`. This is a different scenario: two deliveries of the
+  **identical** `stripe_event_id` arriving **genuinely concurrently** (not sequentially - fired as
+  backgrounded Python requests launched together, as could happen from e.g. a duplicated webhook
+  endpoint registration, a load balancer fanning out one delivery to two app instances, or Stripe's
+  own at-least-once delivery guarantee landing two copies within the same instant). Both requests
+  passed `TransactionExistsByStripeEventId` (returned `false` for both, since neither had
+  committed yet) before either had inserted its `PaymentTransaction` row, both applied their side
+  effect, and only collided at the very end on `CreateTransaction`'s unique-index insert. Result:
+  one consumable-purchase webhook for a 15-rose bundle credited the user's balance to **30** (double
+  the purchase), with one request returning 200 `"Webhook processed."` and the other a raw HTTP
+  500 from the losing `CreateTransaction`'s unique-violation - instead of the idempotent "already
+  processed" response a sequential replay correctly gets.
+- **Root cause:** The idempotency guard was a bare existence check, not a lock: "does a
+  `PaymentTransaction` for this `stripe_event_id` already exist?" followed, several non-atomic
+  repository calls and DbContexts later, by the insert that would make that check return `true`
+  for a future caller. Nothing serialized two callers that both ask the question before either has
+  answered it for the ledger. (This bug only became reliably reproducible, rather than
+  intermittent, after the BUG-18 fix above removed the `AdjustConsumableBalance` race that had
+  been *masking* it - before BUG-18's fix, the same concurrent-delivery scenario usually crashed
+  or lost an update inside `AdjustConsumableBalance` itself before ever reaching the
+  `CreateTransaction` collision this bug describes.)
+- **Impact:** Directly monetary - a customer could be credited double the consumable units (or,
+  for the subscription-checkout path, have `UpsertUserSubscription` applied twice, though that call
+  is idempotent on its own and so has no visible symptom) for a single Stripe charge, with one of
+  the two concurrent requests also surfacing an unhandled 500 instead of the clean idempotent
+  response Stripe webhook consumers are documented to expect from a duplicate delivery.
+- **Fix applied:** New `ISubscriptionRepository.AcquireEventLock(string stripe_event_id)`
+  (`SubscriptionRepository.cs`, ~line 380) takes a session-scoped Postgres advisory lock
+  (`pg_advisory_lock(hashtext(stripe_event_id))`) on a DbContext whose connection is explicitly
+  kept open (`OpenConnectionAsync`) across the entire critical section, returning an
+  `IAsyncDisposable AdvisoryLockHandle` that releases the lock (`pg_advisory_unlock`) and closes
+  the connection on disposal. This differs from `MatchRepository`'s existing
+  `pg_advisory_xact_lock` use in `RecordSwipe`/`CreateMatch` (transaction-scoped, released at
+  commit) because the critical section here spans multiple separate `DbContextFactory`-created
+  DbContexts across several repository calls, not one transaction - a session-scoped lock is the
+  only shape that can hold across that. `HandleWebhook` now acquires this lock (keyed on the
+  event's `stripe_event_id`, skipped entirely for the - defensively handled elsewhere - case of no
+  `stripe_event_id` at all) immediately before the idempotency check and holds it via a
+  `try/finally` across the idempotency check, the full event-type dispatch, and every handler's
+  side effects plus its `CreateTransaction` insert, disposing it only after all of that completes
+  (or throws). A genuinely concurrent second delivery now blocks on lock acquisition until the
+  first has fully committed (including `CreateTransaction`), then correctly finds
+  `TransactionExistsByStripeEventId` `true` and exits via the ordinary idempotent path - no double
+  side effect, no 500.
+- **Reverification (2026-10-26):** Fired 3 truly concurrent deliveries of the identical
+  `stripe_event_id` for a 15-rose consumable purchase (backgrounded Python requests launched
+  together) - exactly 1 returned 200 `"Webhook processed."`, the other 2 both returned 200
+  `"Event already processed."`, final balance landed at exactly 15 (not 30/45), and exactly 1
+  `PaymentTransaction` row exists for that event id. Repeated across 3 additional rounds of 5
+  concurrent identical-event-id deliveries each - every round: 1 credit, 1 transaction row, all
+  200s, zero 500s. Also reverified that BUG-11/BUG-12's existing advisory-lock-based fixes (in the
+  unrelated `MatchRepository.RecordSwipe`/`CreateMatch` path) still hold under fresh concurrent
+  load, confirming this new lock doesn't interact badly with the pre-existing ones. `dotnet build
+  ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-20 — `MatchService.BlockUser`/`MatchRepository.BlockUser` had no existence check and no concurrency lock [FIXED] — found running the `ENDPOINT_TEST_CASES.md` MatchController (M1-M10) pass
+
+- **Where:** `MatchService.BlockUser` (ProConnect.Application/Service/MatchService.cs, ~line 608)
+  and `MatchRepository.BlockUser` (ProConnect.Infrastructure/Repository/MatchRepository.cs,
+  ~line 374 onward).
+- **Symptom (reproduced live):** Two independent crashes behind the same endpoint. (1) Blocking a
+  syntactically-valid but nonexistent `targetUserId` fell straight through to
+  `MatchRepository.BlockUser`'s insert, which hit the `Blocks` table's FK constraint and surfaced
+  as a raw unhandled-exception 500 instead of a clean "Target user not found." (2) Unlike
+  `Swipe`/`Unmatch` (BUG-03/BUG-21's sibling concern), the existing "already blocked" no-op check
+  and the insert ran inside one transaction but under no lock at all - two genuinely concurrent
+  `BlockUser` calls for the identical (blocker, blocked) pair could both see `alreadyBlocked=false`
+  and both attempt the insert; since `(blocker_user_id, blocked_user_id)` is the `Blocks` table's
+  composite primary key, the loser's `SaveChangesAsync` threw an unhandled `DbUpdateException`
+  wrapping a Postgres `23505` unique violation (raw 500) instead of the idempotent no-op the
+  existing check was clearly meant to provide.
+- **Root cause:** No analogue of `Swipe`'s existence check existed for `BlockUser` at all (missing
+  precondition, same family as BUG-01/02/03/04), and the check-then-insert pair that *did* exist
+  was unguarded by any lock, same shape as BUG-11/12's original swipe/match race before those were
+  fixed.
+- **Impact:** A client blocking a bad/stale `targetUserId`, or two concurrent block attempts (e.g.
+  a double-tap on "Block" in the client), both degraded to a raw 500 instead of a clean,
+  specific response.
+- **Fix applied:** New `IUserRepository.Exists(Guid userid)` (`UserRepository.cs`, ~line 205) -
+  deliberately a bare, unfiltered-by-`is_active` existence check (unlike `GetById`), since blocking
+  a deactivated target must still succeed. `MatchService.BlockUser` now calls it before touching
+  `MatchRepository.BlockUser` and returns `"Target user not found."` cleanly if it fails.
+  Separately, `MatchRepository.BlockUser` now takes a `pg_advisory_xact_lock` keyed on the
+  *ordered* `(blockerUserId, blockedUserId)` pair (not canonicalized/sorted, since blocking is
+  directional - A blocking B and B blocking A are independent rows) before the existing
+  check-then-insert, serializing a duplicate call against itself instead of racing.
+- **Reverification:** Live-tested as part of the MatchController M1-M10 pass this session: blocking
+  a random nonexistent `targetUserId` now returns a clean `"Target user not found."` instead of a
+  500; a genuinely concurrent duplicate `BlockUser` call for the same pair now resolves to exactly
+  one successful block with the second call observing the already-blocked no-op instead of a
+  raw 500. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-21 — Concurrent `Unmatch` + `SendMessage` can insert a message against a just-deleted match, or vice versa [FIXED] (G-24) — found running the MessageController (MSG1-MSG2) pass
+
+- **Where:** `MessageService.SendMessage` / `IMessageRepository.SendMessageIfParticipant`
+  (ProConnect.Application/Service/MessageService.cs ~line 39;
+  ProConnect.Infrastructure/Interface/IMessageRepository.cs ~line 19) and
+  `MatchRepository.Unmatch` (ProConnect.Infrastructure/Repository/MatchRepository.cs, ~line 348).
+- **Symptom (reproduced live, G-24):** Sending a message used to be two separate, unlocked round
+  trips: a plain `IsParticipant` check, then a plain insert referencing `matchid` as an FK. If a
+  concurrent `Unmatch` deleted the `matches` row in between those two steps, the insert's FK
+  reference pointed at a now-gone match and threw an unhandled `DbUpdateException`, surfacing as a
+  raw 500 instead of a clean "Match not found."
+- **Root cause:** Same check-then-write race shape as BUG-20/BUG-11/12 - the participant check and
+  the message insert were not atomic with respect to a concurrent delete of the same match.
+- **Impact:** A message send racing a genuine unmatch (realistic - either party can unmatch at any
+  time) could crash with a raw 500 instead of the expected clean error, and in principle could also
+  leave a message row that gets silently cascade-deleted moments later with no feedback to the
+  sender about why.
+- **Fix applied:** New `IMessageRepository.SendMessageIfParticipant(matchId, senderUserId, content)`
+  combines the `IsParticipant` check and the insert into a single transaction guarded by a
+  `pg_advisory_xact_lock` keyed on `matchId` - the *identical* lock key `MatchRepository.Unmatch`
+  now also takes before its delete (BUG-20's fix pattern applied here too), so the two operations
+  serialize instead of racing. Returns `null` if the sender is not a participant at the moment the
+  lock is acquired (including a `matchId` just unmatched out from under the call);
+  `MessageService.SendMessage` maps `null` to a clean `"Match not found."` response. This superseded
+  the old plain `SendMessage`, which trusted a separate, unlocked `IsParticipant` call made moments
+  earlier by the caller.
+- **Reverification:** Live-tested as part of the MessageController MSG1-MSG2 pass this session:
+  fired a `SendMessage` concurrently with an `Unmatch` on the same match repeatedly - every race
+  resolved cleanly to either a successful send on a still-valid match or a clean "Match not found.",
+  with zero raw 500s observed across repeated attempts. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-22 — `NotificationPageRequest`/`TransactionPageRequest` had no validator registered, so `page<=0` leaked a raw Postgres error and `pagesize<=0` could deadlock pagination [FIXED] (G-4 / G-4b / G-27) — found running the NotificationController (N1-N6) pass
+
+- **Where:** `ProConnect.Application/Validation/NotificationPageRequestValidator.cs` and
+  `TransactionPageRequestValidator.cs` (both new files), registered in
+  `ProConnect.WebApi/Program.cs` ~line 117.
+- **Symptom (reproduced live, G-4/G-4b):** `GET /api/notification?page=0` (and the equivalent on
+  the subscription transaction-history endpoint) flowed `page<=0` straight into EF's `.Skip()` as a
+  negative offset, which Postgres itself rejects with `2201X: OFFSET must not be negative` - an
+  unhandled exception leaking a raw 500 with a Postgres-specific error message, instead of a clean
+  validation error. Separately (G-27), `pagesize=0` produced a `has_more` calculation that was
+  always `true` regardless of how many results actually existed, a pagination dead-end a client
+  could get stuck in.
+- **Root cause:** Unlike every other paginated request type in the app
+  (`MatchCandidatePageRequest`, `MessagePageRequest`), these two request types had no
+  `IValidator<T>` implementation at all, and no manual guard existed in the corresponding service
+  methods either - nothing stood between a bad `page`/`pagesize` and the repository call.
+- **Impact:** Any client (or naive integration) passing `page=0`/`pagesize=0` on these two specific
+  endpoints got a raw, implementation-leaking 500 or a non-terminating pagination loop, instead of
+  the clean `450`/`VALIDATION` response every other paginated endpoint in the app already gives for
+  the same bad input.
+- **Fix applied:** New `NotificationPageRequestValidator`/`TransactionPageRequestValidator`, same
+  bounds as the app's other paginated-request validators (`page >= 1`,
+  `pagesize` in `[1, 50]`), registered as singleton `IValidator<T>` in `Program.cs` alongside the
+  rest.
+- **Reverification:** Live-tested as part of the NotificationController N1-N6 pass this session:
+  `page=0` and `pagesize=0` against `GET /api/notification` both now return a clean `450`
+  `VALIDATION` response instead of a raw 500 or an unbounded page; a valid page/pagesize still
+  returns results normally. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-23 — `RegisterDevice`/`UpsertDeviceToken` silently moved a device token away from a different user with no audit trail [FIXED] (G-9) — found running the NotificationController (N1-N6) pass
+
+- **Where:** `NotificationService.RegisterDevice` (ProConnect.Application/Service/NotificationService.cs,
+  ~line 210) and `NotificationRepository.UpsertDeviceToken`
+  (ProConnect.Infrastructure/Repository/NotificationRepository.cs, ~line 153).
+- **Symptom (reproduced live, G-9):** `UpsertDeviceToken` is deliberately keyed by `device_token`
+  alone (not `(userid, device_token)`) to correctly support the shared/reset-device scenario - a
+  second user registering the same physical device's token should take it over, not create a
+  duplicate row. That re-pointing is intended behavior and correctly succeeded. What was missing was
+  any record of it happening: if userid B's `RegisterDevice` call silently moved a token away from
+  userid A (e.g. A sold/gave away a phone without logging out, or a flaky client re-registered under
+  the wrong account), A would simply stop getting push notifications with zero trace anywhere of
+  why.
+- **Root cause:** The upsert path had no observability at all for the
+  "token moved to a different owner" case specifically (as opposed to the normal
+  "same user re-registering" case, which needs no comment).
+- **Impact:** Not a functional defect (the takeover behavior is correct/intended) but a support and
+  debugging gap - a user reporting "I stopped getting push notifications" for this reason was
+  previously unexplainable from the logs alone.
+- **Fix applied:** `NotificationRepository.UpsertDeviceToken` now returns the previous owner's
+  `userid` (if any) alongside the upsert result; `NotificationService.RegisterDevice` logs a
+  `LogWarning` when that previous owner differs from the caller, naming both userids, while leaving
+  the takeover itself unchanged (still succeeds, still intended behavior).
+- **Reverification:** Live-tested as part of the NotificationController N1-N6 pass this session:
+  registered the same `device_token` for userid A, then for userid B - the call still succeeds for
+  B (200, "Device has been registered for push notifications."), and the server log now contains a
+  `Device token re-registered: userid 'B' took over a device_token previously owned by userid 'A'.`
+  warning that did not exist before the fix. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-24 — `UnregisterDevice` could never match a token containing a literal `/`, because the route left it percent-encoded while storage held it decoded [FIXED] (G-26) — found running the NotificationController (N1-N6) pass
+
+- **Where:** `NotificationController.UnregisterDevice` (ProConnect.WebApi/Controllers/NotificationController.cs,
+  ~line 73) and `NotificationService.UnregisterDevice`
+  (ProConnect.Application/Service/NotificationService.cs, ~line 241).
+- **Symptom (reproduced live, G-26):** A device token containing a literal `/` (e.g.
+  `"simple/slash"`) could be registered fine via `POST .../devices` (stored decoded, exactly as
+  received in the JSON body), but `DELETE .../devices/{device_token}` for that same token always
+  returned "Device not found.", even immediately after registering it.
+- **Root cause:** Confirmed live via diagnostic logging that Kestrel binds the
+  `{device_token}`/`{*device_token}` route segment to the literal, **still percent-encoded** text
+  (`"simple%2Fslash"`) without ever decoding it back into `/` during routing - a routing-pattern
+  change alone (plain segment vs. catch-all) was never going to fix this, since neither one decodes
+  `%2F`. The actual mismatch was downstream: the value `NotificationService.UnregisterDevice`
+  received was still percent-encoded, while `RegisterDevice`/`UpsertDeviceToken` had persisted the
+  raw, already-decoded token straight from the JSON body - so the two never compared equal.
+- **Impact:** Any device token containing a literal `/` (plausible for some token formats, though
+  FCM/APNs registration tokens typically don't contain one) could be registered but never
+  unregistered through the normal API, leaving a stale device permanently subscribed to push
+  notifications for that user with no way to remove it via this endpoint.
+- **Fix applied:** `NotificationService.UnregisterDevice` now un-escapes exactly one sequence -
+  `%2F`/`%2f` back to a literal `/` - before looking the token up, repairing the comparison without
+  touching any other character; a no-op for the vast majority of tokens that never contain an
+  encoded slash to begin with. The `{*device_token}` catch-all route segment was left in place
+  (harmless/backward-compatible either way) since it was never actually the cause.
+- **Reverification:** Live-tested as part of the NotificationController N1-N6 pass this session:
+  registered a device token containing a literal `/`, confirmed `DELETE
+  /api/notification/devices/{url-encoded-token}` now correctly finds and removes it (200, "Device
+  has been unregistered.") instead of "Device not found.". `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-25 — `customer.subscription.deleted` webhook could leave (or re-set) a subscription as Active after Stripe had already deleted it [FIXED] (G-31) — found running the SubscriptionController (S1-S7) pass
+
+- **Where:** `SubscriptionService.HandleWebhook` / `HandleSubscriptionStatusChanged`
+  (ProConnect.Application/Service/SubscriptionService.cs, ~line 391 and ~line 523).
+- **Symptom (reproduced live, G-31):** `customer.subscription.deleted` was dispatched through the
+  exact same `payment_status`-driven status mapping as `customer.subscription.updated`. On an
+  out-of-order/edge delivery where the embedded `Subscription.Status` snapshot in the `.deleted`
+  payload still read `"active"`, that embedded status won the mapping and left (or even re-set) the
+  local `user_subscription` row as `Active` - directly contradicting the fact that Stripe had
+  already deleted the subscription object server-side.
+- **Root cause:** `HandleSubscriptionStatusChanged` had no way to distinguish "trust the embedded
+  status snapshot" (correct for `.updated`) from "the event type itself is the authoritative fact,
+  ignore the snapshot" (required for `.deleted`) - both dispatch paths called it identically.
+- **Impact:** A customer whose subscription Stripe had genuinely deleted (e.g. after exhausting
+  retries on a failed payment, or an explicit cancellation finalizing) could be left with - or
+  have restored to - full Active-tier access in ProConnect's own records, a direct entitlement/
+  billing-integrity bug.
+- **Fix applied:** New `trustEmbeddedStatus` parameter on `HandleSubscriptionStatusChanged`. The
+  `customer.subscription.updated` dispatch passes `true` (unchanged behavior). The
+  `customer.subscription.deleted` dispatch now passes `false` and a `fallbackStatus` of
+  `SubscriptionStatus.Canceled` - when `false`, the embedded status snapshot is never consulted at
+  all and `fallbackStatus` unconditionally wins, so a `.deleted` event always lands the local row as
+  `Canceled` regardless of what the payload's embedded status string says.
+- **Reverification:** Live-tested as part of the SubscriptionController S1-S7 pass this session:
+  sent a `customer.subscription.deleted` webhook event with an embedded `Subscription.Status` of
+  `"active"` against a previously-Active local subscription - the local row correctly transitioned
+  to `Canceled`, not `Active`. `dotnet build ProConnect.sln`: 0 errors.
+
+---
+
+## BUG-26 — `SearchController`/`SearchRepository.Search` had no blocking exclusion at all [FIXED] (G-34) — found running the SearchController (SE1) pass
+
+- **Where:** `SearchRepository.Search` (ProConnect.Infrastructure/Repository/SearchRepository.cs,
+  ~line 35).
+- **Symptom (reproduced live):** A user who had blocked another user (or been blocked by them, in
+  either direction) still saw that user appear in full, unfiltered, in their own Search results.
+  Confirmed live: searched as `jeffweiner08` for `query=Reid H` after he had blocked `reidhoffman` -
+  Reid Hoffman's full profile still came back in the results.
+- **Root cause:** Unlike `MatchRepository`, which excludes blocked-either-direction users from
+  candidate listing, "who liked me", and resurfacing (three separate call sites, all using the
+  identical `blockedEitherDirection` pattern), `SearchRepository.Search`'s base filter was only
+  `u.userid != excludeUserId && u.is_active` - no blocking check of any kind.
+  Search was simply never wired into the Block feature at all, the same category of gap BUG-08
+  originally found for direct swipe.
+- **Impact:** A user could be fully discoverable via Search by someone they'd specifically blocked
+  (or who had blocked them) - the exact safety/privacy guarantee Block is supposed to provide,
+  bypassed through one of the app's primary discovery surfaces.
+- **Fix applied:** Added the identical `blockedEitherDirection` subquery (`db.Blocks` filtered to
+  rows where either side is `excludeUserId`, projected to "the other party") already used three
+  times in `MatchRepository.cs`, and extended `Search`'s base `query` filter to also exclude it.
+- **Reverification:** Live-tested this session: after the fix, the same `query=Reid H` search as
+  `jeffweiner08` (the blocker) now returns `total_count: 0`; the identical `query=Reid` search run
+  as an unrelated third user (no block relationship) still correctly returns Reid Hoffman - confirming
+  the fix is scoped to the actual blocking relationship, not overly broad. `dotnet build
+  ProConnect.WebApi/ProConnect.WebApi.csproj`: 0 errors.
+
+---
+
+## BUG-27 — A failed geocode lookup during radius search silently dropped ALL location filtering (city/state/country text filters too), not just the radius - despite the code's own comment claiming otherwise [FIXED] (SE1-E3) — found running the SearchController (SE1) pass
+
+- **Where:** `SearchRepository.Search` (ProConnect.Infrastructure/Repository/SearchRepository.cs,
+  ~line 66 onward, before the fix).
+- **Symptom (reproduced live):** Searching with `radius_km` set and a `city` value Nominatim could
+  not resolve to coordinates (e.g. a nonsense string) returned **every active user in the system**,
+  completely unfiltered by location - not just ignoring the radius (as documented/intended) but
+  also skipping the city/state/country text-match fallback the code's own comment explicitly
+  claimed would apply ("falls through to any text filters below"). Live test: a nonsense `city` +
+  `radius_km=50` returned all 5 active test users, including ones with completely unrelated real
+  cities.
+- **Root cause:** The text-filter block genuinely lived in the `else` branch of
+  `if (request.radius_km.HasValue)` - i.e. it could only ever run when `radius_km` was *not* set.
+  Whenever `radius_km` *was* set and the geocode lookup failed, control fell out of the `if` block
+  entirely with no filter of any kind applied, despite the inline comment asserting a text-filter
+  fallback that the control flow made structurally unreachable.
+- **Impact:** Worse than "radius is silently ignored" (the documented/intended behavior per
+  `ENDPOINT_TEST_CASES.md` SE1-E3 and the code's own comment) - a geocoding hiccup on a real city
+  name (transient Nominatim failure/timeout, not just a nonsense input) would have produced the
+  same fully-unfiltered "every active user" result set instead of gracefully degrading to a text
+  match on the city/state/country the caller actually provided.
+- **Fix applied:** Extracted the city/state/country `ILike` text-filter block into a shared
+  `ApplyTextLocationFilters(query, request)` helper, and now call it from **both** the
+  `radius_km`-not-set `else` branch (unchanged behavior) and the new `else` of the geocode-success
+  check (the branch that previously did nothing at all), so a geocode miss now actually falls back
+  to the text filters the comment always claimed it did.
+- **Reverification:** Live-tested this session, before/after: before the fix, a nonsense `city` +
+  `radius_km=50` returned `total_count: 5` (everyone); after the fix, the identical request returns
+  `total_count: 0` (correctly, since no active user's `city` matches the nonsense string) - and a
+  regression check confirmed the true-geocode-success radius path (SE1-H4) and the no-radius text
+  path were both unaffected. `dotnet build ProConnect.WebApi/ProConnect.WebApi.csproj`: 0 errors.
+
+---
+
+## BUG-28 — `query`/`industry`/`company`/`city`/`state`/`country` search filters let a caller's own `%`/`_` act as SQL `LIKE` wildcards instead of literal characters [FIXED] (G-36) — found running the SearchController (SE1) pass
+
+- **Where:** `SearchRepository.Search` / `ApplyTextLocationFilters`
+  (ProConnect.Infrastructure/Repository/SearchRepository.cs).
+- **Symptom (reproduced live):** `GET /api/search?industry=_` (a literal underscore, presumably
+  intended as literal search text) matched **every** active user with any non-empty `industry`
+  value - none of whose industries actually contained a literal underscore. Confirmed live:
+  `industry=_` returned 3 users (every user with a non-null industry) vs. the correct 0; `industry=%`
+  behaved the same way for the same reason.
+- **Root cause:** Every `ILike` call site built its pattern via raw string interpolation
+  (`$"%{request.industry}%"`), so a caller-supplied `%` or `_` was passed straight through to
+  Postgres' `LIKE`/`ILIKE` as the wildcard metacharacters they are, rather than as literal text to
+  search for. Not a security/injection issue (parameterized via EF's `ILike` translation, and
+  results are still scoped by `is_active`/self-exclusion/blocking), but a genuine correctness bug:
+  a caller's own filter value could unintentionally broaden their search far past what they
+  actually typed.
+- **Impact:** Any filter value containing a literal `%` or `_` (plausible in real company/industry
+  names, e.g. `"Smith_Co"`, not just adversarial input) silently returned a broader result set than
+  the caller asked for, with no error or indication anything was off.
+- **Fix applied:** New `EscapeLikePattern` helper escapes `\`, `%`, and `_` (backslash-prefixed) in
+  every user-supplied filter value before it's interpolated into a pattern, paired with the
+  3-argument `EF.Functions.ILike(column, pattern, escapeChar: "\\")` overload so Postgres treats the
+  escaped sequences as literal characters. Applied uniformly to all six `ILike` call sites
+  (`query`'s four OR'd fields, `industry`, `company`, and the three fields now routed through
+  `ApplyTextLocationFilters`: `city`, `state`, `country`).
+- **Reverification:** Live-tested this session, before/after: before the fix, `industry=_` returned
+  `total_count: 3`; after the fix, the identical request returns `total_count: 0`. Regression
+  checks confirmed ordinary substring matching (`industry=Internet` → 2 results) and a literal
+  `industry=%` (→ 0 results, correctly no industry contains a literal `%`) both behave correctly.
+  `dotnet build ProConnect.WebApi/ProConnect.WebApi.csproj`: 0 errors.
+
+---
+
 ## Notes
 
 - Fifteen bugs documented in total (twelve from the original 2026-10-23/24 pass, BUG-13 found
@@ -766,7 +1291,45 @@ full re-test pass this update is based on.
   actually being present, since every field on `MatchCriteriaRequest` is optional. Reverified live
   against `PUT /api/match/v1/criteria`: `min_age=40,max_age=25` and `min_age=-5` both now return a
   clean `450`/`VALIDATION` error instead of silently saving; a valid range still saves normally.
-- **All fifteen bugs (plus the CRITERIA-04 validation gap) are now FIXED and reverified** as of
+- BUG-16 is its own category: a **third-party SDK throwing an undocumented exception type**
+  (`Stripe.net`'s `EventUtility.ConstructEvent` throwing a bare `NullReferenceException`, not a
+  `StripeException`, on a null `api_version`) slipping past a catch block that was deliberately
+  scoped to the exception type the SDK's own public contract promises. Same "a 500 shouldn't be
+  the final answer for a deterministically-bad request" lesson as BUG-01/02/03/06, just one layer
+  further into a dependency's internals - worth remembering that narrowly-typed catch blocks
+  around third-party calls should be paired with a broader fallback for the specific call site,
+  not just the method as a whole, when the dependency's exception contract isn't fully trustworthy.
+- BUG-17 is a direct sequel to BUG-10/11/12: it was found specifically by re-probing the exact
+  scenario BUG-10 was fixed for (concurrent Likes from one user) *after* that fix shipped, and
+  discovering that making the increment atomic was necessary but not sufficient - the
+  admission-control decision built on top of it (read usage, check against limit, then increment)
+  was still a three-step non-atomic sequence. This is the clearest evidence in the whole project
+  that "the write is now atomic" and "the business rule enforced by composing several calls
+  around that write is now atomic" are two different claims, and fixing the first doesn't
+  automatically fix the second - worth a standing check, any time an atomic upsert is introduced
+  to fix a race, for whether anything upstream of it still does a non-atomic check-then-call.
+- BUG-18 is a near-exact sibling of BUG-10 (same defect shape: non-atomic read-then-write on a
+  table with a composite primary key, same crash-or-lose-silently dual symptom) but in a
+  *different* repository method (`AdjustConsumableBalance` vs. `IncrementFeatureUsage`) that
+  BUG-10's own fix and reverification never touched, because BUG-10's bulk/scale test plan had no
+  concurrent consumable-purchase traffic in it. Found only because this session's live
+  concurrency probing deliberately extended past the Like/match path BUG-10/11/12 already covered
+  - a reminder that "we already fixed this exact bug class once" doesn't mean every method with
+  the same vulnerable shape was caught by that fix, especially when the original discovery method
+  (a specific load-test scenario) never exercised the sibling code path at all.
+- BUG-19 looks like a second instance of BUG-13 (both are "webhook replay isn't fully idempotent")
+  but is a genuinely distinct defect once examined closely: BUG-13 was about a handler that never
+  joined the idempotency ledger at all (missing a `CreateTransaction` call), reproducible with
+  ordinary *sequential* replay; BUG-19 is about the ledger-check-then-ledger-write gap itself being
+  non-atomic, only reproducible under genuine *concurrent* delivery of the identical event id -
+  every handler already correctly joins the ledger, the gap is in the timing between checking it
+  and writing to it. Notably, BUG-19 was partially masked by BUG-18 until BUG-18 was fixed: before
+  that fix, the same concurrent-delivery scenario usually surfaced as an `AdjustConsumableBalance`
+  crash or lost update before ever reaching the `CreateTransaction` collision BUG-19 describes -
+  fixing one race fully exposed the next one underneath it, which is why this session treated
+  "the symptom changed after a fix, not just disappeared" as a signal to keep investigating rather
+  than a sign the investigation was done.
+- **All nineteen bugs (plus the CRITERIA-04 validation gap) are now FIXED and reverified** as of
   2026-10-26. Each bug entry above has a
   "Reverification" subsection naming the exact in-code fix location and the specific live-test or
   bulk/scale-test evidence confirming it holds under real concurrent load, not just a single
@@ -775,7 +1338,71 @@ full re-test pass this update is based on.
   duplicate-notification gating under BUG-11/12) are documented inline in their parent bugs'
   reverification notes rather than given separate bug numbers, since the current source code
   itself labels them as sub-fixes of those bugs (`"BUG-09 fix (follow-up discovered during
-  reverification)"` / `"Found during BUG-11 reverification"`). See `TEST_RUN_LOG.md` for the full
-  re-test pass (SIGNUP/AUTH/PROFILE/CRITERIA/MATCH/NOTIF/SUB single-user suite plus the 19-user
-  bulk/scale pass, and the dedicated BUG-14 email-duplicate-signup case) this update is based on,
-  and `PROJECT_NOTES.md` for the changelog entries.
+  reverification)"` / `"Found during BUG-11 reverification"`). BUG-16 through BUG-19 were found by
+  actually starting the live API against real Postgres/Redis and exercising it end-to-end (both
+  single-request and genuinely concurrent traffic) rather than by re-reading prior documentation
+  or git history - BUG-11 and BUG-12's existing advisory-lock fixes were also explicitly
+  re-verified live during this pass and confirmed to still hold, with no regression. See
+  `TEST_RUN_LOG.md` for the full re-test pass (SIGNUP/AUTH/PROFILE/CRITERIA/MATCH/NOTIF/SUB
+  single-user suite, the 19-user bulk/scale pass, the dedicated BUG-14 email-duplicate-signup case,
+  and this latest live concurrency-focused pass) this update is based on, and `PROJECT_NOTES.md`
+  for the changelog entries.
+- **BUG-20 through BUG-28 (full `ENDPOINT_TEST_CASES.md` execution pass, 2026-10-26, part 2)**
+  were all found by running every case in `ENDPOINT_TEST_CASES.md` live against the running API,
+  in controller order (User, Account, Match, Message, Notification, Subscription, Search), rather
+  than by re-reading prior documentation. BUG-20/21 are a matched pair with BUG-11/12/19's pattern
+  (unguarded check-then-write races) applied to two paths those earlier bugs' own fixes never
+  touched (`BlockUser`, `SendMessage` vs. concurrent `Unmatch`). BUG-22 is a straightforward
+  missing-validator gap, same shape as the missing-precondition family (BUG-01 through BUG-04) but
+  for pagination parameters instead of entity existence. BUG-23 is the same category as BUG-05
+  (an observability gap, not a functional defect - the underlying takeover behavior was always
+  correct and intended). BUG-24 is notable for how it was diagnosed: the obvious-looking fix
+  (changing the route from a plain segment to a catch-all) was tried first and confirmed, via
+  diagnostic logging added temporarily to the controller, to not be the cause at all - Kestrel
+  never decodes `%2F` during routing regardless of route shape; the real mismatch was one layer
+  deeper, in `UnregisterDevice` comparing a still-encoded value against a repository that stored
+  the decoded one. BUG-25 is a sibling of BUG-13/19's webhook-handling theme but about which
+  signal (event type vs. embedded payload snapshot) should be authoritative, not about idempotency.
+  BUG-26 is a direct sibling of BUG-08 (a safety feature - Block - correctly wired into some paths
+  but never wired into another), this time Search instead of direct Swipe. BUG-27 is unusual in
+  that the bug was in the code's own explanatory comment being wrong about what the code actually
+  did - the comment described an intended fallback that the control-flow structure made literally
+  unreachable. BUG-28 is a straightforward input-sanitization gap (unescaped SQL LIKE
+  metacharacters) with real but limited impact (broadened results, not an injection/security
+  issue, since every call site uses parameterized `ILike` translation). All nine were reproduced
+  live before any fix and reverified live after, per each entry's Reverification subsection above;
+  `dotnet build` reports 0 errors after the full set of changes.
+- **Gaps confirmed real-but-intentionally-unfixed during this pass** - each a deliberate design
+  tradeoff the codebase and/or `ENDPOINT_TEST_CASES.md` itself frames as "worth testing" rather
+  than "broken", so fixing them would mean overriding an intentional decision, not correcting a
+  defect: G-10 (`GetPlans` requires auth - a product decision, not an oversight), G-11 (a
+  misconfigured Stripe price id surfaces as a specific, logged error rather than failing silently -
+  acceptable), G-12 (no upper bound on consumable purchase quantity - a pricing/business decision,
+  not a correctness bug), G-25 (`MarkAllAsRead`'s in-memory load-all is an accepted perf tradeoff
+  at current scale), G-28 (a webhook's `periodEnd` is never corrected after the fact - a documented
+  limitation of the current webhook model; this gap number is unrelated to, and should not be
+  confused with, this update's new BUG-28 above, which is a different issue entirely), G-32
+  (`invoice.payment_succeeded` while `PastDue` doesn't auto-reset the subscription to `Active` -
+  confirmed live; the doc itself hedges this as defensible, since auto-reactivating on one
+  successful invoice could mask a still-failing payment method), G-33 (silent no-op when a
+  `checkout.session.completed` webhook carries neither `plan_code` nor `consumable_key` -
+  confirmed live; left as-is per the doc's own hedged "should probably Warning-log" framing), and
+  G-35 (no feature-gate/paywall on Search's radius mode - confirmed via code read and live radius
+  searches succeeding with no subscription at all; whether radius search should be a paid feature
+  is a product decision this test pass has no authority to make, so it is reported rather than
+  silently "fixed" by adding a paywall the product may not want).
+- **G-29/G-30 turned out to already be fixed, not live bugs.** Both describe symptoms that the
+  prior session's BUG-19 fix (the `AcquireEventLock` advisory-lock fix for concurrent identical
+  `stripe_event_id` webhook deliveries) already resolves as a side effect; live-testing the exact
+  scenarios these two gaps describe during this pass found both already behaving correctly.
+  `ENDPOINT_TEST_CASES.md` is simply stale on these two entries - a documentation-staleness
+  finding, not a newly-discovered bug - and should be updated to note that BUG-19's fix already
+  covers them.
+- **Test-document inaccuracies found** (not code bugs - `ENDPOINT_TEST_CASES.md` itself is wrong):
+  (1) the SearchController section references `lat`/`long` query parameters that do not exist
+  anywhere in `SearchRequest.cs`/`SearchRequestValidator.cs` - the real mechanism is that
+  `radius_km` triggers server-side geocoding of the supplied `city`/`state`/`country` via
+  `IGeocodingProvider`, with no client-supplied coordinates accepted at all; (2) a prior session's
+  N3-H2 case likewise referenced behavior that doesn't match the current
+  `NotificationController`/`NotificationService` implementation. Both should be corrected directly
+  in `ENDPOINT_TEST_CASES.md`; neither required any code change.

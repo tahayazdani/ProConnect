@@ -328,46 +328,96 @@ namespace ProConnect.Application.Service
                     message = "Invalid webhook signature."
                 };
             }
+            // BUG-16 fix: Stripe's own event schema documents `api_version` as nullable, but Stripe.net's
+            // EventUtility.ConstructEvent (called with its 3-arg overload, so throwOnApiVersionMismatch
+            // defaults to true) unconditionally calls IsCompatibleApiVersion(eventApiVersion) to decide
+            // whether to throw - and that comparison throws a bare NullReferenceException (not a
+            // StripeException) when eventApiVersion is null, regardless of throwOnApiVersionMismatch.
+            // That NRE used to fall straight through the StripeException catch above into
+            // ExceptionHandlingMiddleware's generic 500, for a payload whose signature was perfectly
+            // valid. A 500 tells Stripe "our outage, please retry" - but this failure is deterministic
+            // and will reproduce identically on every retry, so it should be a 400 ("don't retry, bad
+            // request") like the signature-failure path right above it.
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "SubscriptionService.HandleWebhook failed to parse a validly-signed webhook payload (e.g. Stripe.net choking on a null/legacy api_version).");
+                return new ProConnectResponse<string>
+                {
+                    statuscode = 400,
+                    issuccessfull = false,
+                    errormessage = "Unable to process webhook payload.",
+                    message = "Unable to process webhook payload."
+                };
+            }
 
             try
             {
+                // BUG-19 fix: everything from here down - the idempotency check, the event-type dispatch,
+                // and every handler's side effects plus its CreateTransaction insert - runs while holding
+                // an advisory lock keyed on this exact stripe_event_id (see
+                // ISubscriptionRepository.AcquireEventLock remarks). A genuinely concurrent second
+                // delivery of the same event_id blocks here until the first has fully committed, then
+                // correctly finds TransactionExistsByStripeEventId true and exits via the idempotent path
+                // below instead of racing into a double side effect (e.g. a consumable balance credited
+                // twice for one purchase - reproduced in BUGS_FOUND.md BUG-19). Events with no
+                // stripe_event_id at all (shouldn't happen from real Stripe, but defensively handled
+                // elsewhere in this method) skip locking entirely, same as they already skip the
+                // idempotency check below.
+                IAsyncDisposable eventLock = string.IsNullOrEmpty(webhookEvent.stripe_event_id)
+                    ? null
+                    : await _subscriptionRepository.AcquireEventLock(webhookEvent.stripe_event_id);
 
-                // Idempotency - a Stripe retry (anything but a 2xx response) must never double-apply, e.g.
-                // double-crediting a consumable - see PaymentTransactionEntity remarks.
-                if (!string.IsNullOrEmpty(webhookEvent.stripe_event_id)
-                    && await _subscriptionRepository.TransactionExistsByStripeEventId(webhookEvent.stripe_event_id))
+                try
                 {
-                    return new ProConnectResponse<string> { body = "ok", message = "Event already processed." };
-                }
+                    // Idempotency - a Stripe retry (anything but a 2xx response) must never double-apply,
+                    // e.g. double-crediting a consumable - see PaymentTransactionEntity remarks.
+                    if (!string.IsNullOrEmpty(webhookEvent.stripe_event_id)
+                        && await _subscriptionRepository.TransactionExistsByStripeEventId(webhookEvent.stripe_event_id))
+                    {
+                        return new ProConnectResponse<string> { body = "ok", message = "Event already processed." };
+                    }
 
-                switch (webhookEvent.event_type)
+                    switch (webhookEvent.event_type)
+                    {
+                        case "checkout.session.completed":
+                            if (!string.IsNullOrEmpty(webhookEvent.consumable_key))
+                                await HandleConsumableCheckoutCompleted(webhookEvent);
+                            else if (!string.IsNullOrEmpty(webhookEvent.plan_code))
+                                await HandleSubscriptionCheckoutCompleted(webhookEvent);
+                            break;
+
+                        case "customer.subscription.updated":
+                            await HandleSubscriptionStatusChanged(webhookEvent, SubscriptionStatus.PastDue, trustEmbeddedStatus: true);
+                            break;
+
+                        case "customer.subscription.deleted":
+                            // BUG-25 fix (G-31): trustEmbeddedStatus=false - a .deleted event means Stripe has
+                            // removed the subscription object, full stop; that fact must win over whatever
+                            // status string happens to be embedded in this particular payload. Previously this
+                            // called the same payment_status-driven mapping as .updated, so a .deleted event
+                            // whose embedded Subscription.Status was (unusually, e.g. out-of-order delivery)
+                            // still "active" mapped payment_status to Succeeded and left/set the local row
+                            // Active instead of Canceled - reproduced live in BUGS_FOUND.md BUG-25 / G-31.
+                            await HandleSubscriptionStatusChanged(webhookEvent, SubscriptionStatus.Canceled, trustEmbeddedStatus: false);
+                            break;
+
+                        case "invoice.payment_succeeded":
+                        case "invoice.payment_failed":
+                            await HandleInvoiceEvent(webhookEvent);
+                            break;
+
+                        default:
+                            _logger.LogInformation("SubscriptionService.HandleWebhook ignoring unhandled event type '{EventType}'.", webhookEvent.event_type);
+                            break;
+                    }
+
+                    return new ProConnectResponse<string> { body = "ok", message = "Webhook processed." };
+                }
+                finally
                 {
-                    case "checkout.session.completed":
-                        if (!string.IsNullOrEmpty(webhookEvent.consumable_key))
-                            await HandleConsumableCheckoutCompleted(webhookEvent);
-                        else if (!string.IsNullOrEmpty(webhookEvent.plan_code))
-                            await HandleSubscriptionCheckoutCompleted(webhookEvent);
-                        break;
-
-                    case "customer.subscription.updated":
-                        await HandleSubscriptionStatusChanged(webhookEvent, SubscriptionStatus.PastDue);
-                        break;
-
-                    case "customer.subscription.deleted":
-                        await HandleSubscriptionStatusChanged(webhookEvent, SubscriptionStatus.Canceled);
-                        break;
-
-                    case "invoice.payment_succeeded":
-                    case "invoice.payment_failed":
-                        await HandleInvoiceEvent(webhookEvent);
-                        break;
-
-                    default:
-                        _logger.LogInformation("SubscriptionService.HandleWebhook ignoring unhandled event type '{EventType}'.", webhookEvent.event_type);
-                        break;
+                    if (eventLock != null)
+                        await eventLock.DisposeAsync();
                 }
-
-                return new ProConnectResponse<string> { body = "ok", message = "Webhook processed." };
             }
             catch (Exception ex)
             {
@@ -466,9 +516,17 @@ namespace ProConnect.Application.Service
 
         // customer.subscription.updated/deleted - resolved by stripe_subscription_id since those events
         // don't reliably carry our own userid metadata unless explicitly set on the Subscription object
-        // itself. `fallbackStatus` is applied only when the event's own payment_status couldn't be mapped
-        // to something more specific (see IPaymentGateway.ParseWebhookEvent).
-        private async Task HandleSubscriptionStatusChanged(PaymentWebhookEvent evt, SubscriptionStatus fallbackStatus)
+        // itself. `fallbackStatus` is applied whenever the mapping doesn't resolve to Active - either
+        // because the event's own payment_status wasn't Succeeded (see IPaymentGateway.ParseWebhookEvent),
+        // or, for a .deleted event, unconditionally (see trustEmbeddedStatus below).
+        //
+        // BUG-25 fix (G-31): `trustEmbeddedStatus` - when false (passed by the .deleted dispatch case),
+        // the embedded Subscription.Status snapshot is never consulted at all and `fallbackStatus` always
+        // wins. A .deleted event is Stripe's authoritative statement that the subscription object itself
+        // is gone; the status string embedded in that same payload can still read "active" in some
+        // out-of-order/edge deliveries, and letting that override the deletion fact previously left (or
+        // even re-set) the local row as Active after Stripe had already deleted the subscription.
+        private async Task HandleSubscriptionStatusChanged(PaymentWebhookEvent evt, SubscriptionStatus fallbackStatus, bool trustEmbeddedStatus)
         {
             var subscription = !string.IsNullOrEmpty(evt.stripe_subscription_id)
                 ? await _subscriptionRepository.GetUserSubscriptionByStripeSubscriptionId(evt.stripe_subscription_id)
@@ -480,7 +538,9 @@ namespace ProConnect.Application.Service
                 return;
             }
 
-            subscription.status = evt.payment_status == PaymentStatus.Succeeded ? SubscriptionStatus.Active : fallbackStatus;
+            subscription.status = trustEmbeddedStatus && evt.payment_status == PaymentStatus.Succeeded
+                ? SubscriptionStatus.Active
+                : fallbackStatus;
 
             await _subscriptionRepository.UpsertUserSubscription(subscription);
             await _featureGateService.InvalidateEffectivePlan(subscription.userid);

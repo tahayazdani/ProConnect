@@ -16,10 +16,15 @@ namespace ProConnect.Infrastructure.Interface
         Task<bool> IsParticipant(Guid userid, Guid matchId);
 
         /// <summary>
-        /// Appends a new message to `matchId` on behalf of `senderUserId`. Caller (MessageService) is
-        /// responsible for the IsParticipant check first - this does not re-check.
+        /// BUG-21 fix: combines the IsParticipant check and the insert into a single transaction guarded by
+        /// a pg_advisory_xact_lock keyed on matchId, so a concurrent MatchRepository.Unmatch (which takes
+        /// the identical lock before its delete) can no longer land in between the check and the insert and
+        /// cause an FK-violation 500 (reproduced in BUGS_FOUND.md BUG-21 / G-24). Returns null if the sender
+        /// is not a participant of matchId (including a matchId that was just unmatched) - caller
+        /// (MessageService) maps that to "Match not found." Superseded the old plain SendMessage, which
+        /// trusted a separate, unlocked IsParticipant call made moments earlier by the caller.
         /// </summary>
-        Task<Message> SendMessage(Guid matchId, Guid senderUserId, string content);
+        Task<Message> SendMessageIfParticipant(Guid matchId, Guid senderUserId, string content);
 
         /// <summary>
         /// A match's message history, most-recent-first (same ordering convention as

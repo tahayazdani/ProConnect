@@ -136,6 +136,7 @@ namespace ProConnect.Infrastructure.Repository
 
             var entity = await db.UserDeviceTokens.FirstOrDefaultAsync(t => t.device_token == device_token);
             var now = DateTime.UtcNow;
+            Guid? previousUserId = null;
 
             if (entity is null)
             {
@@ -146,6 +147,13 @@ namespace ProConnect.Infrastructure.Repository
                     created_at_utc = now
                 };
                 db.UserDeviceTokens.Add(entity);
+            }
+            else
+            {
+                // BUG-23 fix (G-9): capture who owned this token immediately before we overwrite it below,
+                // so the caller (NotificationService.RegisterDevice) can log an audit trail if ownership is
+                // about to silently move to a different user - see UserDeviceToken.previous_userid remarks.
+                previousUserId = entity.userid;
             }
 
             // Re-points an existing token to whichever user just registered it - see UserDeviceTokenEntity
@@ -163,7 +171,8 @@ namespace ProConnect.Infrastructure.Repository
                 device_token = entity.device_token,
                 platform = entity.platform,
                 created_at_utc = entity.created_at_utc,
-                last_seen_at_utc = entity.last_seen_at_utc
+                last_seen_at_utc = entity.last_seen_at_utc,
+                previous_userid = previousUserId
             };
         }
 

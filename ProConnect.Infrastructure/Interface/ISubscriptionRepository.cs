@@ -40,11 +40,26 @@ namespace ProConnect.Infrastructure.Interface
         /// UserFeatureUsageEntity remarks on period_key derivation) - 0 if no row exists yet.</summary>
         Task<int> GetFeatureUsage(Guid userid, string feature_key, string period_key);
 
-        /// <summary>Read-then-increment-or-insert, returns the usage count after incrementing. Callers
-        /// (FeatureGateService.TryConsume) are expected to have already checked GetFeatureUsage against the
-        /// limit before calling this, so it unconditionally adds `amount` - see UserFeatureUsageEntity
-        /// remarks for why this isn't a Redis atomic increment or raw SQL upsert.</summary>
+        /// <summary>Unconditional increment-or-insert, returns the usage count after incrementing. Only
+        /// safe for callers that don't need a limit enforced atomically with the write - today that's
+        /// RefundConsumption's negative-amount credit-back (a refund should never be blocked by the cap)
+        /// - see UserFeatureUsageEntity remarks for why this isn't a Redis atomic increment or raw SQL
+        /// upsert. BUG-17: this used to also back the admission-control path in FeatureGateService.
+        /// TryConsume, preceded by a separate GetFeatureUsage read to check the limit - that two-step
+        /// read-then-write was not atomic, so concurrent callers could all read the same stale usage count,
+        /// all pass the check, and all increment, overshooting the cap (reproduced in BUGS_FOUND.md
+        /// BUG-17). TryConsume now calls TryIncrementFeatureUsage instead, which folds the check into the
+        /// same statement as the write.</summary>
         Task<int> IncrementFeatureUsage(Guid userid, string feature_key, string period_key, int amount = 1);
+
+        /// <summary>Atomic check-and-increment for admission control: increments used_count by `amount`
+        /// and returns the new value, but ONLY if the result would not exceed `limit` (null limit = no
+        /// cap, always allowed) - the check and the write happen in the same Postgres statement, row-locked
+        /// at the DB level, so concurrent callers serialize instead of all reading the same stale usage
+        /// count the way the old GetFeatureUsage-then-IncrementFeatureUsage pattern allowed (BUG-17).
+        /// Returns null when the increment was rejected because it would have exceeded `limit` - no row is
+        /// written in that case. See SubscriptionRepository for the exact SQL.</summary>
+        Task<int?> TryIncrementFeatureUsage(Guid userid, string feature_key, string period_key, int amount, int? limit);
 
         Task<int> GetConsumableBalance(Guid userid, string feature_key);
 
@@ -64,5 +79,26 @@ namespace ProConnect.Infrastructure.Interface
         /// <summary>Idempotency check for HandleWebhook - see PaymentTransactionEntity remarks on why
         /// stripe_event_id is unique.</summary>
         Task<bool> TransactionExistsByStripeEventId(string stripe_event_id);
+
+        /// <summary>BUG-19 fix: HandleWebhook's idempotency guard used to be a bare
+        /// TransactionExistsByStripeEventId check followed, several non-atomic repository calls later, by
+        /// CreateTransaction's insert - with the side-effect calls (AdjustConsumableBalance /
+        /// UpsertUserSubscription / etc.) sandwiched in between. Two genuinely concurrent deliveries of the
+        /// identical stripe_event_id (not just a sequential Stripe retry, which this guard already handled
+        /// fine) could both pass the exists-check before either had inserted its transaction row, both
+        /// apply the side effect, and only collide at the very end on CreateTransaction's unique-index
+        /// insert - by which point the double side effect (e.g. a consumable balance credited twice for
+        /// one purchase) had already landed, with the loser also surfacing an ugly unhandled-exception 500
+        /// instead of the same idempotent "already processed" response a sequential replay gets (reproduced
+        /// in BUGS_FOUND.md BUG-19). AcquireEventLock takes a session-level Postgres advisory lock
+        /// (pg_advisory_lock, hashed from stripe_event_id - same keyed-serialization idea as
+        /// MatchRepository's pg_advisory_xact_lock use in RecordSwipe/CreateMatch, just session- rather
+        /// than transaction-scoped because the critical section it guards spans multiple separate
+        /// repository calls/DbContexts, not one). HandleWebhook holds it for the full duration of
+        /// processing a given event_id, so a concurrent second delivery blocks until the first has fully
+        /// committed (including CreateTransaction), then correctly sees TransactionExistsByStripeEventId
+        /// return true and exits via the ordinary idempotent path - no double side effect, no 500. Disposing
+        /// the returned handle releases the lock and the connection that holds it.</summary>
+        Task<IAsyncDisposable> AcquireEventLock(string stripe_event_id);
     }
 }

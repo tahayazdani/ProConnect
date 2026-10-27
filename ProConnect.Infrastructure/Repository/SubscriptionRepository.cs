@@ -209,6 +209,41 @@ namespace ProConnect.Infrastructure.Repository
             return result.Single();
         }
 
+        // BUG-17 fix: the admission-control path used to call GetFeatureUsage (a plain read) and then,
+        // separately, IncrementFeatureUsage (the atomic-but-unconditional upsert above) from
+        // FeatureGateService.TryConsume. Each call opened its own transaction, so two concurrent callers
+        // could both run GetFeatureUsage before either had run IncrementFeatureUsage, both observe e.g.
+        // used_count=9 against a limit of 10, both conclude "allowed", and both increment - landing at 11,
+        // not 10 (reproduced in BUGS_FOUND.md BUG-17; a 15-way concurrent probe against a 10/day cap let
+        // all 15 through). The fix folds the limit check into the same statement as the write so there is
+        // no gap between "check" and "use" for a concurrent caller to land in:
+        //  - The INSERT...SELECT branch (brand new row, i.e. first use in this period) only produces a row
+        //    to insert when amount <= limit, via the WHERE on the SELECT.
+        //  - The ON CONFLICT DO UPDATE branch (row already exists) only applies when
+        //    existing used_count + amount <= limit, via the WHERE on the DO UPDATE.
+        // Either way, Postgres evaluates the guard and performs the write as one row-locked statement, so
+        // concurrent callers serialize on the row instead of racing in application memory. If the guard
+        // fails, zero rows are affected/returned - no row is written (no insert, no update) - and this
+        // returns null so the caller knows the increment was rejected, not merely "stayed the same".
+        // limit = null means uncapped, matching FeatureEntitlement.limit_value's convention elsewhere.
+        public async Task<int?> TryIncrementFeatureUsage(Guid userid, string feature_key, string period_key, int amount, int? limit)
+        {
+            await using var db = await _dbContextFactory.CreateDbContextAsync();
+            var now = DateTime.UtcNow;
+
+            var result = await db.Database.SqlQuery<int>($@"
+                INSERT INTO user_feature_usage (userid, feature_key, period_key, used_count, updated_at_utc)
+                SELECT {userid}, {feature_key}, {period_key}, {amount}, {now}
+                WHERE {limit} IS NULL OR {amount} <= {limit}
+                ON CONFLICT (userid, feature_key, period_key)
+                DO UPDATE SET used_count = user_feature_usage.used_count + {amount},
+                              updated_at_utc = {now}
+                WHERE {limit} IS NULL OR user_feature_usage.used_count + {amount} <= {limit}
+                RETURNING used_count").ToListAsync();
+
+            return result.Count == 0 ? (int?)null : result.Single();
+        }
+
         public async Task<int> GetConsumableBalance(Guid userid, string feature_key)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
@@ -218,29 +253,38 @@ namespace ProConnect.Infrastructure.Repository
             return entity?.balance ?? 0;
         }
 
+        // BUG-18 fix: this used to be the exact same unprotected EF read-then-add-or-update-then-
+        // SaveChangesAsync pattern that IncrementFeatureUsage had before BUG-10's fix - see the BUG-10
+        // comment above for the general shape of the problem. user_consumable_balance has the identical
+        // composite-PK-on-(userid, feature_key) shape as user_feature_usage, so it was exposed to the
+        // identical race: two concurrent callers (e.g. two genuinely-concurrent webhook deliveries for the
+        // same consumable purchase, or a purchase racing a refund) could both read the same starting
+        // balance and both separately Add() a brand-new tracked entity when none existed yet, with two
+        // possible outcomes depending on timing - either a lost update (both compute balance=delta against
+        // the same stale read, last SaveChangesAsync wins, one side's credit/debit silently vanishes) or a
+        // raw Npgsql 23505 unique-violation on PK_user_consumable_balance when both tried to INSERT the
+        // same (userid, feature_key) row at once. Reproduced in BUGS_FOUND.md BUG-18 via two genuinely
+        // concurrent identical-looking (but distinct-event-id) consumable-purchase webhooks for a
+        // brand-new balance row: one request's INSERT landed, the other's died with "An error occurred
+        // while saving the entity changes" (http 500) from the PK collision - and had both instead landed
+        // as competing updates to an existing row, the loser's delta would have been silently lost instead
+        // of erroring. Same fix shape as BUG-10: a single atomic INSERT ... ON CONFLICT DO UPDATE,
+        // row-locked at the DB level, so concurrent callers serialize on the row instead of racing in
+        // application memory.
         public async Task<int> AdjustConsumableBalance(Guid userid, string feature_key, int delta)
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
+            var now = DateTime.UtcNow;
 
-            var entity = await db.UserConsumableBalances
-                .FirstOrDefaultAsync(b => b.userid == userid && b.feature_key == feature_key);
-            if (entity is null)
-            {
-                entity = new UserConsumableBalanceEntity
-                {
-                    userid = userid,
-                    feature_key = feature_key,
-                    balance = 0
-                };
-                db.UserConsumableBalances.Add(entity);
-            }
+            var result = await db.Database.SqlQuery<int>($@"
+                INSERT INTO user_consumable_balance (userid, feature_key, balance, updated_at_utc)
+                VALUES ({userid}, {feature_key}, {delta}, {now})
+                ON CONFLICT (userid, feature_key)
+                DO UPDATE SET balance = user_consumable_balance.balance + {delta},
+                              updated_at_utc = {now}
+                RETURNING balance").ToListAsync();
 
-            entity.balance += delta;
-            entity.updated_at_utc = DateTime.UtcNow;
-
-            await db.SaveChangesAsync();
-
-            return entity.balance;
+            return result.Single();
         }
 
         public async Task<Product> GetActiveProductByConsumableKey(string consumable_key)
@@ -325,6 +369,45 @@ namespace ProConnect.Infrastructure.Repository
 
             await using var db = await _dbContextFactory.CreateDbContextAsync();
             return await db.PaymentTransactions.AsNoTracking().AnyAsync(t => t.stripe_event_id == stripe_event_id);
+        }
+
+        // BUG-19 fix - see ISubscriptionRepository.AcquireEventLock remarks for the full story. The
+        // DbContext's connection is opened explicitly (rather than left to EF's normal open-per-command,
+        // close-after-command default) because pg_advisory_lock is session-scoped: the lock has to be
+        // taken and released on the exact same physical connection, held open across everything
+        // HandleWebhook does in between - not just for the duration of a single SqlQuery call the way
+        // every other method in this class uses its DbContext.
+        public async Task<IAsyncDisposable> AcquireEventLock(string stripe_event_id)
+        {
+            var db = await _dbContextFactory.CreateDbContextAsync();
+            await db.Database.OpenConnectionAsync();
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_lock(hashtext({stripe_event_id}))");
+            return new AdvisoryLockHandle(db, stripe_event_id);
+        }
+
+        private sealed class AdvisoryLockHandle : IAsyncDisposable
+        {
+            private readonly ProConnectDbContext _db;
+            private readonly string _eventId;
+
+            public AdvisoryLockHandle(ProConnectDbContext db, string eventId)
+            {
+                _db = db;
+                _eventId = eventId;
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                try
+                {
+                    await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_unlock(hashtext({_eventId}))");
+                }
+                finally
+                {
+                    await _db.Database.CloseConnectionAsync();
+                    await _db.DisposeAsync();
+                }
+            }
         }
     }
 }

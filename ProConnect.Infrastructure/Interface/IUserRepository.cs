@@ -51,5 +51,16 @@ namespace ProConnect.Infrastructure.Interface
         /// the userid doesn't exist at all.
         /// </summary>
         Task<bool> DeleteAccount(Guid userid);
+        /// <summary>
+        /// BUG-20 fix: bare existence check, deliberately unfiltered by is_active (unlike GetById) - unlike
+        /// Like/Pass (BUG-03), which should not let you swipe on a deactivated user at all, BlockUser should
+        /// still succeed against a deactivated target (e.g. blocking someone before they potentially
+        /// reactivate later), so this can't reuse GetById's filtered semantics. Used by
+        /// MatchService.BlockUser to reject a syntactically-valid-but-nonexistent targetUserId cleanly
+        /// before MatchRepository.BlockUser's insert, instead of letting it fall through to the Blocks
+        /// table's FK constraint and surface as a raw unhandled-exception 500 (reproduced in
+        /// BUGS_FOUND.md BUG-20).
+        /// </summary>
+        Task<bool> Exists(Guid userid);
     }
 }

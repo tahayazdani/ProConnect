@@ -36,24 +36,43 @@ namespace ProConnect.Infrastructure.Repository
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync();
 
+            // BUG-26 fix (G-34): Search had no blocking exclusion at all, so a user who blocked (or was
+            // blocked by) excludeUserId in either direction still surfaced in full. Mirrors the identical
+            // blockedEitherDirection pattern already used three times in MatchRepository.cs.
+            var blockedEitherDirection = db.Blocks
+                .Where(b => b.blocker_user_id == excludeUserId || b.blocked_user_id == excludeUserId)
+                .Select(b => b.blocker_user_id == excludeUserId ? b.blocked_user_id : b.blocker_user_id);
+
             // is_active excludes deactivated users from ever appearing in search results.
-            var query = db.Users.AsNoTracking().Where(u => u.userid != excludeUserId && u.is_active);
+            var query = db.Users.AsNoTracking().Where(u =>
+                u.userid != excludeUserId && u.is_active && !blockedEitherDirection.Contains(u.userid));
 
             if (!string.IsNullOrWhiteSpace(request.query))
             {
-                var term = request.query.Trim();
+                // BUG-28 fix (G-36): term was interpolated into the ILike pattern raw, so a caller typing a
+                // literal '%' or '_' got Postgres LIKE wildcard behavior instead of a literal-text match
+                // (e.g. industry=_ matched every non-empty industry). Escaping the three LIKE metacharacters
+                // (\, %, _) and passing the matching escapeChar makes '%'/'_' behave as literal characters,
+                // same as every other filter field below.
+                var term = $"%{EscapeLikePattern(request.query.Trim())}%";
                 query = query.Where(u =>
-                    (u.full_name != null && EF.Functions.ILike(u.full_name, $"%{term}%")) ||
-                    (u.headline != null && EF.Functions.ILike(u.headline, $"%{term}%")) ||
-                    (u.occupation != null && EF.Functions.ILike(u.occupation, $"%{term}%")) ||
-                    (u.company != null && EF.Functions.ILike(u.company, $"%{term}%")));
+                    (u.full_name != null && EF.Functions.ILike(u.full_name, term, LikeEscapeChar)) ||
+                    (u.headline != null && EF.Functions.ILike(u.headline, term, LikeEscapeChar)) ||
+                    (u.occupation != null && EF.Functions.ILike(u.occupation, term, LikeEscapeChar)) ||
+                    (u.company != null && EF.Functions.ILike(u.company, term, LikeEscapeChar)));
             }
 
             if (!string.IsNullOrWhiteSpace(request.industry))
-                query = query.Where(u => u.industry != null && EF.Functions.ILike(u.industry, $"%{request.industry}%"));
+            {
+                var pattern = $"%{EscapeLikePattern(request.industry)}%";
+                query = query.Where(u => u.industry != null && EF.Functions.ILike(u.industry, pattern, LikeEscapeChar));
+            }
 
             if (!string.IsNullOrWhiteSpace(request.company))
-                query = query.Where(u => u.company != null && EF.Functions.ILike(u.company, $"%{request.company}%"));
+            {
+                var pattern = $"%{EscapeLikePattern(request.company)}%";
+                query = query.Where(u => u.company != null && EF.Functions.ILike(u.company, pattern, LikeEscapeChar));
+            }
 
             Point centerPoint = null;
             if (request.radius_km.HasValue)
@@ -66,19 +85,21 @@ namespace ProConnect.Infrastructure.Repository
 
                     query = query.Where(u => u.location != null && u.location.Distance(centerPoint) <= radiusInMeters);
                 }
-                // if the center point couldn't be resolved, radius_km is silently ignored (falls through to
-                // any text filters below) rather than failing the whole search over a geocoding miss
+                else
+                {
+                    // BUG-27 fix (G-? / SE1-E3): the comment here always claimed a geocode miss "falls
+                    // through to any text filters below", but that was never true - the text-filter block
+                    // lived in the else branch of this very if, so it was unreachable whenever radius_km
+                    // was set. A geocode miss therefore silently applied NO location filter at all (not
+                    // even the city/state/country text match it claimed to fall back to), returning every
+                    // active user regardless of the city/state/country the caller actually asked for.
+                    // Explicitly calling the same text-filter helper here makes the documented fallback real.
+                    query = ApplyTextLocationFilters(query, request);
+                }
             }
             else
             {
-                if (!string.IsNullOrWhiteSpace(request.city))
-                    query = query.Where(u => u.city != null && EF.Functions.ILike(u.city, $"%{request.city}%"));
-
-                if (!string.IsNullOrWhiteSpace(request.state))
-                    query = query.Where(u => u.state != null && EF.Functions.ILike(u.state, $"%{request.state}%"));
-
-                if (!string.IsNullOrWhiteSpace(request.country))
-                    query = query.Where(u => u.country != null && EF.Functions.ILike(u.country, $"%{request.country}%"));
+                query = ApplyTextLocationFilters(query, request);
             }
 
             var totalcount = await query.CountAsync();
@@ -98,6 +119,36 @@ namespace ProConnect.Infrastructure.Repository
                 items = page.Select(ToDomain).ToList(),
                 totalcount = totalcount
             };
+        }
+
+        // BUG-28 fix (G-36): see the EscapeLikePattern/LikeEscapeChar usage above - same escaping applied
+        // here so city/state/country text filters can't be broadened by a literal '%' or '_' either.
+        private const string LikeEscapeChar = "\\";
+
+        private static string EscapeLikePattern(string value) =>
+            value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+        private static IQueryable<UserEntity> ApplyTextLocationFilters(IQueryable<UserEntity> query, SearchRequest request)
+        {
+            if (!string.IsNullOrWhiteSpace(request.city))
+            {
+                var pattern = $"%{EscapeLikePattern(request.city)}%";
+                query = query.Where(u => u.city != null && EF.Functions.ILike(u.city, pattern, LikeEscapeChar));
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.state))
+            {
+                var pattern = $"%{EscapeLikePattern(request.state)}%";
+                query = query.Where(u => u.state != null && EF.Functions.ILike(u.state, pattern, LikeEscapeChar));
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.country))
+            {
+                var pattern = $"%{EscapeLikePattern(request.country)}%";
+                query = query.Where(u => u.country != null && EF.Functions.ILike(u.country, pattern, LikeEscapeChar));
+            }
+
+            return query;
         }
 
         private static UserRequest ToDomain(UserEntity entity) => new UserRequest

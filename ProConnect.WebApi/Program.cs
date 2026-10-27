@@ -114,6 +114,9 @@ internal class Program
         builder.Services.AddSingleton<IValidator<MessageRequest>, MessageRequestValidator>();
         builder.Services.AddSingleton<IValidator<MessagePageRequest>, MessagePageRequestValidator>();
         builder.Services.AddSingleton<IValidator<MatchCriteriaRequest>, MatchCriteriaRequestValidator>();
+        // BUG-22 fix: these two were previously unregistered entirely (see each validator's remarks).
+        builder.Services.AddSingleton<IValidator<NotificationPageRequest>, NotificationPageRequestValidator>();
+        builder.Services.AddSingleton<IValidator<TransactionPageRequest>, TransactionPageRequestValidator>();
         builder.Services.AddSingleton<ProConnectConfig, ProConnectConfig>();
 
         // Phase 7 - subscriptions/payments. IPaymentGateway is the only seam that knows about Stripe

@@ -219,7 +219,15 @@ namespace ProConnect.Application.Service
                         message = "A valid device_token is required."
                     };
 
-                await _notificationRepository.UpsertDeviceToken(userid, request.device_token, request.platform);
+                var result = await _notificationRepository.UpsertDeviceToken(userid, request.device_token, request.platform);
+
+                // BUG-23 fix (G-9): the upsert is deliberately keyed by device_token alone (shared/reset
+                // device scenario - see UserDeviceTokenEntity remarks), so re-pointing itself is intended
+                // behavior and still succeeds here. What was missing was any audit trail for the case where
+                // it silently moves a token away from a *different* user - log it so there's at least a
+                // record if a user reports they stopped getting push notifications unexpectedly.
+                if (result.previous_userid.HasValue && result.previous_userid.Value != userid)
+                    _logger.LogWarning($"Device token re-registered: userid '{userid}' took over a device_token previously owned by userid '{result.previous_userid.Value}'.");
 
                 return new ProConnectResponse<string> { body = "ok", message = "Device has been registered for push notifications." };
             }
@@ -242,7 +250,16 @@ namespace ProConnect.Application.Service
                         message = "A valid device_token is required."
                     };
 
-                var removed = await _notificationRepository.RemoveDeviceToken(userid, device_token);
+                // BUG-24 fix (G-26): Kestrel binds route segments without ever decoding a %2F back into a
+                // literal '/' (confirmed live via diagnostic logging - see NotificationController.UnregisterDevice
+                // remarks), but RegisterDevice/UpsertDeviceToken persisted the token exactly as received in the
+                // JSON body, i.e. already un-encoded. So a token containing a literal '/' round-trips through
+                // the URL still percent-encoded and never matches the stored row. Un-escaping just this one
+                // sequence - the only one routing is known to leave alone - repairs the comparison without
+                // touching any other character, and is a no-op for the vast majority of tokens (FCM/APNs
+                // registration tokens don't contain a literal slash to begin with).
+                var normalized_device_token = device_token?.Replace("%2F", "/").Replace("%2f", "/");
+                var removed = await _notificationRepository.RemoveDeviceToken(userid, normalized_device_token);
                 if (!removed)
                     return new ProConnectResponse<string>
                     {

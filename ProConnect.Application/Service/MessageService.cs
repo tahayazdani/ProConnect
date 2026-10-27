@@ -36,12 +36,15 @@ namespace ProConnect.Application.Service
                         message = "content is required."
                     };
 
-                // Same ownership check as MatchRepository.Unmatch - stops a user from sending into a
-                // conversation for a match that doesn't exist or that they aren't one of the two
-                // participants of (also catches a stale/already-unmatched matchId, since Unmatch
-                // hard-deletes the matches row).
-                var isParticipant = await _messageRepository.IsParticipant(userid, matchId);
-                if (!isParticipant)
+                // BUG-21 fix: the check (was IsParticipant) and the insert now happen atomically inside
+                // SendMessageIfParticipant, under a lock shared with MatchRepository.Unmatch - see that
+                // method's remarks. Previously this was two separate, unlocked round trips (IsParticipant
+                // here, then a plain insert), which raced against a concurrent Unmatch and could surface as
+                // a raw FK-violation 500 (reproduced in BUGS_FOUND.md BUG-21 / G-24). A null result here
+                // means the sender was not a participant at the moment the lock was acquired - including a
+                // matchId that was just unmatched out from under this call.
+                var message = await _messageRepository.SendMessageIfParticipant(matchId, userid, request.content);
+                if (message is null)
                     return new ProConnectResponse<MessageResponse>
                     {
                         issuccessfull = false,
@@ -49,7 +52,6 @@ namespace ProConnect.Application.Service
                         message = "Match not found."
                     };
 
-                var message = await _messageRepository.SendMessage(matchId, userid, request.content);
                 var response = MapToResponse(message);
 
                 // Live push to whichever clients have joined this match's SignalR group - best-effort,

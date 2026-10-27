@@ -202,6 +202,14 @@ namespace ProConnect.Infrastructure.Repository
             return true;
         }
 
+        // BUG-20 fix: see IUserRepository.Exists remarks - bare, unfiltered-by-is_active existence check.
+        public async Task<bool> Exists(Guid userid)
+        {
+            await using var db = await _dbContextFactory.CreateDbContextAsync();
+
+            return await db.Users.AsNoTracking().AnyAsync(u => u.userid == userid);
+        }
+
         private static string UserCacheKey(Guid userid) => $"user:{userid}";
 
         private static UserEntity ToEntity(UserRequest request)

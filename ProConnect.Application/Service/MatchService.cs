@@ -605,6 +605,21 @@ namespace ProConnect.Application.Service
                         message = "You cannot block yourself."
                     };
 
+                // BUG-20 fix: unlike Swipe (BUG-03), there was no existence check at all here - a
+                // syntactically-valid-but-nonexistent targetUserId fell straight through to
+                // MatchRepository.BlockUser's insert, which hit the Blocks table's FK constraint and
+                // surfaced as a raw unhandled-exception 500 (reproduced in BUGS_FOUND.md BUG-20).
+                // Deliberately uses the unfiltered Exists check, not GetById - a deactivated target should
+                // still be blockable (contrast Swipe, which should NOT let you swipe on a deactivated
+                // user).
+                if (!await _userRepository.Exists(targetUserId))
+                    return new ProConnectResponse<string>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Target user not found.",
+                        message = "Target user not found."
+                    };
+
                 await _matchRepository.BlockUser(userid, targetUserId);
 
                 // blocking changes both sides' candidate pool immediately - drop any cached recommendations

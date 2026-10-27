@@ -61,8 +61,17 @@ namespace ProConnect.WebApi.Controllers
             return StatusCode(response.statuscode, response);
         }
 
+        // BUG-24 fix (G-26): a device_token containing a %2F does NOT get split across route segments -
+        // verified live (diagnostic logging) that Kestrel binds the single {device_token} segment to the
+        // literal, still-encoded text "...%2F..." without ever decoding it back into a '/' during routing.
+        // So a plain {device_token} route was never the problem, and {*device_token} (tried first, left
+        // here since it's harmless/backward compatible either way) doesn't fix anything on its own. The
+        // actual mismatch is that the value NotificationService.UnregisterDevice receives is still
+        // percent-encoded ("simple%2Fslash") while RegisterDevice/UpsertDeviceToken persisted the raw,
+        // decoded token ("simple/slash") straight from the JSON body - see the %2F un-escape fix applied
+        // in NotificationService.UnregisterDevice for the actual root-cause fix (BUGS_FOUND.md BUG-24 / G-26).
         [HttpDelete]
-        [Route("devices/{device_token}")]
+        [Route("devices/{*device_token}")]
         public async Task<IActionResult> UnregisterDevice(string device_token)
         {
             var response = await _notificationService.UnregisterDevice(CurrentUserId, device_token);

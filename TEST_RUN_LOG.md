@@ -331,3 +331,169 @@ plus 2 new benign `CS8629` warnings in the new validator, from `.Value` access a
 
 **Result: PASS (post-fix), all three findings.** See `BUGS_FOUND.md`'s BUG-14 follow-up addendum,
 new BUG-15 section, and Notes for full root-cause/fix detail.
+
+## 2026-10-26 (latest) — Full live re-run of `TEST_PLAN.md` against the running API, including a dedicated concurrency pass
+
+**Trigger:** explicit instruction to test every case in `TEST_PLAN.md` by actually running the
+live API (not by re-reading prior documentation/git history), and to capture and fix any real
+error found along the way.
+
+**Environment:** `dotnet run --project ProConnect.WebApi` (`ASPNETCORE_ENVIRONMENT=Development`,
+`http://localhost:5109`), same `proconnect-postgres`/`proconnect-redis` Docker containers as
+previous passes, restarted mid-session after each code fix to pick up the rebuilt `.dll`. Stripe
+faked via a hand-signed webhook script (`/tmp/send_webhook.py`, HMAC-SHA256, fresh timestamp per
+call) against a throwaway `dotnet user-secrets` webhook secret; FCM push left dark/unconfigured by
+design, same as every prior pass.
+
+### Single-user functional re-pass
+
+Re-ran the full SIGNUP/AUTH/PROFILE/CRITERIA/MATCH/NOTIF/SUB suite from §5.1-§5.6 above end to
+end against the live, already-patched (BUG-01 through BUG-15) build. Every case passed with no
+regressions. Additionally re-verified SUB's webhook paths (checkout completed, invoice
+succeeded/failed, subscription deleted, idempotent replay) and MATCH-12's cache-invalidation
+behavior, both still correct.
+
+### New finding — BUG-16: webhook with a null `api_version` crashes with raw HTTP 500
+
+While constructing hand-signed webhook payloads for the SUB re-pass, a payload with `api_version:
+null` (a schema-legal shape per Stripe's own docs) produced an unexpected HTTP 500 instead of
+processing normally or failing cleanly. Root-caused to Stripe.net's `EventUtility.ConstructEvent`
+throwing a bare `NullReferenceException` (not `StripeException`) on a null API version, which fell
+through the existing BUG-06-fix catch block. **Fixed** by adding a dedicated `catch (Exception ex)`
+scoped to just the `ParseWebhookEvent` call, returning the same clean 400 shape as the
+signature-failure path. Reverified: identical payload now returns 400
+`"Unable to process webhook payload."`, not a 500. See `BUGS_FOUND.md` BUG-16.
+
+### Dedicated concurrency pass (new this session)
+
+Rather than relying on the single-user sequential suite, deliberately fired genuine concurrent
+traffic (backgrounded `curl`/Python processes launched together and `wait`ed, not sequential
+loops) at three specific scenarios the project's bug history (BUG-10/11/12/13) flagged as the
+highest-risk shape for hiding races: concurrent Likes against the daily quota cap, concurrent
+consumable-purchase webhooks, and concurrent identical-event-id webhook deliveries.
+
+| Probe | Result | Evidence |
+|---|---|---|
+| 15 concurrent Likes from one Free user at 0/10 quota | **FAIL → BUG-17, then FIXED** | Quota cap overshot past 10 before the fix (check-then-write race survived BUG-10's atomic-increment fix); post-fix, 2 clean re-runs both landed at exactly 10 accepted / 5 clean rejections / `used_count == 10`. See `BUGS_FOUND.md` BUG-17. |
+| 2 concurrent consumable-purchase webhooks, distinct event ids, same user | **FAIL → BUG-18, then FIXED** | Pre-fix: one run lost an update (balance landed at 15 instead of 30), another run crashed one request with a raw 500. Root cause: `AdjustConsumableBalance` had the same non-atomic read-then-write shape BUG-10 fixed in a sibling method, never covered by that fix. Post-fix (atomic upsert, same pattern as BUG-10/17): 2 clean re-runs both landed at the correct summed balance of 30, no 500s. See `BUGS_FOUND.md` BUG-18. |
+| 3+ concurrent *identical*-`stripe_event_id` webhook deliveries (true concurrency, not sequential replay) | **FAIL → BUG-19, then FIXED** | Pre-fix (after BUG-18 was already fixed): reliably double-credited the purchase (balance 30 for one logical 15-unit purchase), one request 200 the other a raw 500 from `CreateTransaction`'s unique-violation - distinct from BUG-13's already-fixed *sequential* replay case, since the idempotency-ledger check and write are non-atomic with respect to each other. Fixed via a new session-scoped Postgres advisory lock (`AcquireEventLock`) held across `HandleWebhook`'s entire idempotency-check-through-`CreateTransaction` critical section. Post-fix, reverified across 4 rounds (1 round of 3 concurrent, 3 rounds of 5 concurrent): every round landed at exactly 1 credit / 1 transaction row / all 200s, zero 500s. See `BUGS_FOUND.md` BUG-19. |
+| BUG-11/BUG-12 regression check under fresh concurrent Like/match traffic | **PASS** | Re-ran concurrent reciprocal-Like and repeat-Like probes against the current build - `MatchRepository`'s existing advisory-lock fixes for both bugs still hold, no duplicate match rows, no duplicate `NewMatch` notifications, no quota double-charge on re-Likes. Confirms the new BUG-19 advisory lock doesn't interact badly with the pre-existing ones. |
+
+### Summary
+
+- **All 19 bugs (BUG-01 through BUG-19) are now FIXED and reverified** — see `BUGS_FOUND.md` for
+  per-bug fix locations and evidence.
+- **0 regressions**: every case that passed in every prior pass still passes; BUG-11/BUG-12's
+  concurrency fixes explicitly re-verified live and confirmed still solid.
+- **4 new bugs found and fixed in this single session** (BUG-16, BUG-17, BUG-18, BUG-19) — three
+  of the four (BUG-17/18/19) were found exclusively through a dedicated concurrency pass that went
+  beyond the single-user sequential suite, continuing the pattern established by BUG-10/11/12/13:
+  this project's highest-severity defects are consistently the ones invisible to sequential
+  testing alone. BUG-19 specifically was only fully exposed once BUG-18 was fixed — a reminder to
+  keep probing a scenario even after a fix changes its symptom, rather than treating a changed
+  symptom as "resolved."
+- **Cleanup performed after this pass:** `TRUNCATE users CASCADE` (all test users and FK-dependent
+  rows removed, confirmed zero afterward), throwaway Stripe webhook secret removed from `dotnet
+  user-secrets` (JWT secrets preserved), test server process stopped, all `/tmp` scratch files
+  (`qa_env.sh`, `send_webhook.py`, `race_targets.txt`, server logs, etc.) removed.
+
+## 2026-10-26 (continued) — Full `ENDPOINT_TEST_CASES.md` execution: NotificationController, SubscriptionController, SearchController
+
+### Trigger
+
+Continuing the same standing instruction ("run all cases from `ENDPOINT_TEST_CASES.md` and fix
+issues") into the three controller sections not yet covered by a dedicated live pass:
+NotificationController (N1-N6), SubscriptionController (S1-S7), and SearchController (SE1, cases
+H1-H4/E1-E7). Earlier the same day, a separate pass through User/Account/Match/Message already
+found and fixed BUG-20/21 (documented in `BUGS_FOUND.md`); this entry covers the remainder.
+
+### Environment
+
+Same Docker-based stack as every prior pass: `proconnect-postgres` (postgis/postgis:16-3.4-alpine)
+and `proconnect-redis` (redis:7-alpine) containers reused rather than recreated, API started via
+`dotnet run --no-build` against `ProConnect.WebApi` on port 5109, stdout/stderr redirected to
+`/tmp/server_log.txt`. All versioned endpoints exercised at their real path
+(`/api/{controller}/v1.0`, per `BaseController`'s route template — not the unversioned path the
+test doc's curl examples sometimes imply). Pre-existing signed JWTs reused for auth
+(`/tmp/t1.txt`, `token_a/b/c.txt`). Server restarted after every `SearchRepository.cs` change so
+each fix was reverified against a freshly-compiled binary, not hot-patched. SearchController
+radius cases made real outbound Nominatim/OpenStreetMap geocoding calls (no mock), with
+`SearchResult:*`/`Geocode:*` Redis keys explicitly flushed before any query whose correctness
+depended on freshly-seeded data. Three existing users (Jeff Weiner `f1dd42c6`, Reid Hoffman
+`bd311aaf`, Andy Gu `92ba1f16`) were hand-seeded via raw SQL with realistic `industry`/`city`/
+`state`/`country` text columns **and** real `latitude`/`longitude`/`location` (PostGIS
+`geography(Point,4326)`) coordinates, since the existing fixture data had only one user with any
+city/state set and none with `industry`, making H3/H4 untestable as shipped. Stripe webhook
+payloads for the SubscriptionController pass were hand-built JSON fixtures
+(`/tmp/evt_checkout_sub.json` and siblings) signed with the dev webhook secret via a small Python
+script (`/tmp/sign_webhook.py`) replicating Stripe's `t=<ts>,v1=<hmac>` scheme.
+
+### NotificationController (N1-N6)
+
+| Case | Result | Evidence |
+|---|---|---|
+| N1 — register device token | PASS | Clean 200, token persisted. |
+| N2 — get notifications, default paging | PASS | Correct page/pagesize/has_more shape. |
+| N3 — mark single notification as read | PASS | Confirmed current implementation does not match the test doc's N3-H2 case as written — this is a stale-doc finding (see Notes), not a bug; the actual `MarkAsRead` behavior (404 `ProConnectResponse` on not-found, unread-count push on success) is correct. |
+| N4 — mark all as read | PASS | `MarkAllAsRead` count + conditional `TryNotifyUnreadCountChanged` both correct. |
+| N5 — `page<=0` / `pagesize<=0` on notification/transaction paging | **FAIL → BUG-22, then FIXED** | Pre-fix: `page=0` on `GET /api/notification/v1.0` leaked a raw Postgres `OFFSET must not be negative` 500 instead of a clean validation error; `pagesize<=0` risked an unbounded/zero-row query. Root cause: `NotificationPageRequest`/`TransactionPageRequest` had no `IValidator<T>` registered at all in `Program.cs`, unlike every other paged request type. Fixed by adding `NotificationPageRequestValidator`/`TransactionPageRequestValidator` (page>=1, pagesize between 1 and a sane max) and registering both. Reverified: same request now returns a clean `450`/`VALIDATION` response, not a 500. See `BUGS_FOUND.md` BUG-22 (G-4/G-4b/G-27). |
+| N6 — register device token that another user already owns (shared/reset-device scenario) | **GAP → BUG-23, then FIXED (observability only)** | Confirmed live: re-registering a token already owned by a different `userid` silently succeeds and re-points it, by design (`UpsertDeviceToken` is deliberately keyed by token alone). No functional bug — but there was no audit trail at all for the "stolen from a different user" case. Fixed by adding a `LogWarning` when `previous_userid` differs from the caller. See `BUGS_FOUND.md` BUG-23 (G-9). |
+| — `UnregisterDevice` with a token containing a literal `/` | **FAIL → BUG-24, then FIXED** | Pre-fix: a token round-tripped through the URL still percent-encoded (`%2F`) and never matched the stored (already-decoded) value, so unregister always 404'd for such tokens. Diagnosed via temporary diagnostic logging added to the controller (since removed) confirming Kestrel never decodes `%2F` during routing regardless of route-template shape — the real mismatch was one layer deeper, in the comparison itself. Fixed by un-escaping just that one sequence before the repository lookup. Reverified: unregister of a token containing `/` now succeeds. See `BUGS_FOUND.md` BUG-24 (G-26). |
+
+### SubscriptionController (S1-S7)
+
+| Case | Result | Evidence |
+|---|---|---|
+| S1 — `GET /plans` (unauth vs auth) | PASS (G-10 confirmed intentional) | Requires auth by design, not an oversight — reported as gap G-10, not fixed. |
+| S2 — checkout session creation, valid plan | PASS | |
+| S3 — checkout session creation, misconfigured Stripe price id | PASS (G-11 confirmed intentional) | Surfaces a specific, logged error rather than failing silently — acceptable per doc's own framing. |
+| S4 — `checkout.session.completed` webhook, subscription mode | PASS | Signed via `/tmp/sign_webhook.py`; subscription row created Active, notification sent. |
+| S5 — `customer.subscription.deleted` webhook | **FAIL → BUG-25, then FIXED** | Pre-fix: depending on event ordering, the handler could leave (or re-set) a subscription as Active even after Stripe had already deleted it, because the handler trusted a stale embedded status snapshot over the event type itself. Fixed by making `.deleted` always force a terminal/Canceled status regardless of the embedded payload (`trustEmbeddedStatus` only applies to the non-terminal event types where ambiguity is acceptable). Reverified: `.deleted` now always lands Canceled regardless of embedded snapshot contents. See `BUGS_FOUND.md` BUG-25 (G-31). |
+| S6 — `invoice.payment_succeeded` while subscription is `PastDue` | PASS (G-32 confirmed intentional) | Confirmed live: does not auto-reset to Active. Doc itself hedges this as defensible (avoids masking a still-failing payment method). Reported as gap, not fixed. |
+| S7 — `checkout.session.completed` with neither `plan_code` nor `consumable_key` in metadata | PASS (G-33 confirmed intentional) | Confirmed live: silent no-op, matching the doc's own hedged framing. Reported as gap, not fixed. |
+| — concurrent identical-event-id replay (G-29/G-30 as described in the test doc) | **PASS — already fixed, doc is stale** | Live-tested both scenarios the doc describes; both already behave correctly as a side effect of the earlier session's BUG-19 `AcquireEventLock` fix. Not a new bug — `ENDPOINT_TEST_CASES.md` simply hasn't been updated since BUG-19 shipped. |
+
+### SearchController (SE1: H1-H4, E1-E7)
+
+| Case | Result | Evidence |
+|---|---|---|
+| H1 — plain text query match (`full_name`/`headline`/`occupation`/`company`) | PASS | |
+| H2 — `industry` filter | PASS (after seeding) | Required hand-seeding `industry` on test users first — fixture data had none. |
+| H3 — `industry` + `company` combined (AND semantics) | PASS (after seeding) | |
+| H4 — `radius_km` true proximity search | PASS (after seeding + fix) | Initially returned 0 results unexpectedly after seeding text city/state/country columns; root-caused to the actual PostGIS `location` geography column still holding a shared placeholder coordinate (39.78,-100.44, center of contiguous US) left over from seed data — unrelated to the text columns just set. Fixed test data (not a bug) by also updating `latitude`/`longitude`/`location` via `ST_SetSRID(ST_MakePoint(lon,lat),4326)::geography` to real coordinates. After that, real Nominatim geocoding + `ST_Distance` nearest-first ordering both confirmed correct. |
+| E1 — blocked user still appears in search results | **FAIL → BUG-26, then FIXED** | Pre-fix: `Search` had no blocking exclusion at all — confirmed live, a user blocked (or who blocked) the searcher in either direction still surfaced in full result set. Root cause: unlike `MatchRepository`'s three call sites, `SearchRepository.Search` never applied the `blockedEitherDirection` pattern. Fixed by adding the identical exclusion to the base query filter. Reverified: previously-visible blocked user now excluded, `totalcount` drops accordingly. See `BUGS_FOUND.md` BUG-26 (G-34). |
+| E2 — deactivated user appears in search | PASS | `is_active` filter already correctly applied. |
+| E3 — `radius_km` set but geocoding the supplied city/state/country fails (nonsense city) | **FAIL → BUG-27, then FIXED** | Pre-fix: live before/after proof — nonsense city + `radius_km` returned 5 results (every active user, no location filter applied at all) despite the code's own comment claiming a geocode miss "falls through to any text filters below"; that text-filter block was actually unreachable dead code, living in the `else` branch of the very `if` that only runs when `radius_km` is set. Fixed by explicitly calling the shared text-filter helper from the geocode-miss branch, making the documented fallback real. Reverified: identical request now returns 0 results (correctly filtered to the nonsense city instead of ignoring location entirely). See `BUGS_FOUND.md` BUG-27 (SE1-E3). |
+| E4 — caller supplies a literal `%` or `_` in `industry`/`query`/`company`/city/state/country | **FAIL → BUG-28, then FIXED** | Pre-fix: live before/after proof — `industry=_` (a literal underscore) matched every non-empty industry value (3 results) instead of requiring a literal `_` in the field, because the term was interpolated raw into the ILike pattern instead of escaped. Fixed by escaping `\`, `%`, `_` in every filter value before building the pattern and passing the matching `escapeChar` to the 3-arg `EF.Functions.ILike` overload. Reverified: `industry=_` now returns 0 results; sanity checks confirmed a literal `%` also now returns 0, and a normal substring match (`industry=Internet`) still correctly returns 2 — the fix narrows wildcard abuse without breaking legitimate substring search. See `BUGS_FOUND.md` BUG-28 (G-36). |
+| E5 — cache key case-sensitivity (`Engineering` vs `engineering` should hit the same cache entry) | PASS | Confirmed via code read of `SearchService.CacheKey` (lowercases the full composite key string) — no live discrepancy found. |
+| E6 — pagination (`page`/`pagesize`) on search results | PASS | |
+| E7 — `radius_km` search with no active subscription/paywall | PASS (G-35 confirmed intentional-but-flagged) | Confirmed via code read (no feature-gate check in `SearchRequestValidator`'s constructor) and live radius searches succeeding with no subscription at all. Reported as a gap for product review, not fixed — whether radius search should be paywalled is a product decision outside this pass's authority. |
+| — nonexistent `lat`/`long` query parameters referenced in the test doc | **N/A — test-document error** | Confirmed `SearchRequest.cs`/`SearchRequestValidator.cs` have no such fields; the real mechanism is server-side geocoding of `city`/`state`/`country` via `IGeocodingProvider`, no client-supplied coordinates accepted. `ENDPOINT_TEST_CASES.md` should be corrected, no code change applicable. |
+
+### Summary
+
+- **9 new bugs found and fixed in this pass**: BUG-20 (`BlockUser` existence check + concurrency
+  lock), BUG-21 (`SendMessage` vs. concurrent `Unmatch` race), BUG-22 (missing pagination
+  validators), BUG-23 (device-token-reregistration audit log), BUG-24 (`%2F` unregister-device
+  fix), BUG-25 (webhook `.deleted` trusts embedded status over event type), BUG-26 (Search missing
+  blocking exclusion), BUG-27 (Search geocode-failure silently drops all location filtering),
+  BUG-28 (Search `ILike` wildcard-escaping gap). Full Where/Symptom/Root cause/Impact/
+  Fix/Reverification detail for each is in `BUGS_FOUND.md`; `dotnet build` reports 0 errors after
+  every fix, each reverified live against a freshly restarted server.
+- **8 gaps confirmed real but intentionally left unfixed** as deliberate design tradeoffs the
+  codebase and/or test doc itself frames as acceptable: G-10, G-11, G-12, G-25, G-28 (webhook
+  `periodEnd` — distinct from this pass's own BUG-28, different issue entirely), G-32, G-33, G-35.
+- **2 gaps (G-29, G-30) turned out to already be fixed** by the prior session's BUG-19
+  `AcquireEventLock` fix — a documentation-staleness finding, not a new bug.
+- **2 factual errors found in `ENDPOINT_TEST_CASES.md` itself**: the nonexistent `lat`/`long`
+  `SearchRequest` query parameters, and the N3-H2 notification case description not matching the
+  current implementation. Both require correcting the test document directly, not code changes.
+- **0 regressions**: BUG-11/12/19's concurrency fixes and every previously-passing case re-checked
+  incidentally during this pass still hold.
+- **Cleanup performed after this pass:** hand-seeded `industry`/`city`/`state`/`country`/
+  `latitude`/`longitude`/`location` test values on Jeff Weiner/Reid Hoffman/Andy Gu reverted to
+  their original fixture state; `SearchResult:*`/`Geocode:*` Redis keys flushed; all `/tmp`
+  scratch files from this pass (`evt_checkout_sub.json`, `sign_webhook.py`, `t1.txt`,
+  `token_a/b/c.txt`, `server_log.txt`, and siblings) removed; test server process stopped; no
+  diagnostic logging left in the tree (the temporary logging added during the BUG-24 investigation
+  was removed once root-caused).
