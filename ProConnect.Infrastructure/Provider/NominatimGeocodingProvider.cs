@@ -17,7 +17,7 @@ namespace ProConnect.Infrastructure.Provider
     /// <summary>
     /// Resolves free-text city/state/country (as provided by LinkedIn/harvestapi) into lat/long via Nominatim
     /// (OpenStreetMap) - the free geocoding option chosen instead of a paid provider (e.g. Google Geocoding).
-    /// Results are cached indefinitely in practice (CacheExpiry.Geocode) since a location's coordinates don't
+    /// Results are cached indefinitely in practice (CacheExpiryConfig.geocode, 90 days by default) since a location's coordinates don't
     /// change, which also keeps repeat lookups of common cities well within Nominatim's usage policy
     /// (https://operations.osmfoundation.org/policies/nominatim/, ~1 request/second, descriptive User-Agent
     /// required). A simple in-process throttle additionally enforces a minimum gap between actual outbound
@@ -32,18 +32,21 @@ namespace ProConnect.Infrastructure.Provider
         private readonly IHttpClientUtilities _httpClientUtilities;
         private readonly Cache _cache;
         private readonly GeocodingConfig _config;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
         private readonly ILogger<NominatimGeocodingProvider> _logger;
 
         public NominatimGeocodingProvider(
             IHttpClientUtilities httpClientUtilities,
             Cache cache,
             IOptions<ProConnectConfig> proConnectConfig,
+            CacheExpiryConfig cacheExpiryConfig,
             ILogger<NominatimGeocodingProvider> logger)
         {
             _httpClientUtilities = httpClientUtilities;
             _cache = cache;
             _config = proConnectConfig.Value?.geocodingConfig
                 ?? throw new InvalidOperationException("ProConnectConfig:GeocodingConfig configuration section is missing.");
+            _cacheExpiryConfig = cacheExpiryConfig;
             _logger = logger;
         }
 
@@ -80,7 +83,7 @@ namespace ProConnect.Infrastructure.Provider
                 }
 
                 return new GeoCoordinate { latitude = latitude, longitude = longitude };
-            }, CacheRegion.GEOCODE, CacheExpiry.Geocode);
+            }, CacheRegion.GEOCODE, TimeSpan.FromSeconds(_cacheExpiryConfig.geocode));
         }
 
         private static string BuildQuery(string city, string state, string country)

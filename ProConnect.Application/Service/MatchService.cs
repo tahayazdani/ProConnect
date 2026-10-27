@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using ProConnect.Application.Interface;
+using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
 using ProConnect.Domain.Model;
 using ProConnect.Domain.Request;
@@ -31,6 +32,7 @@ namespace ProConnect.Application.Service
         private readonly IFeatureGateService _featureGateService;
         private readonly INotificationService _notificationService;
         private readonly Cache _cache;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
         private readonly ILogger<MatchService> _logger;
 
         public MatchService(
@@ -40,6 +42,7 @@ namespace ProConnect.Application.Service
             IFeatureGateService featureGateService,
             INotificationService notificationService,
             Cache cache,
+            CacheExpiryConfig cacheExpiryConfig,
             ILogger<MatchService> logger)
         {
             _matchCriteriaRepository = matchCriteriaRepository;
@@ -48,6 +51,7 @@ namespace ProConnect.Application.Service
             _featureGateService = featureGateService;
             _notificationService = notificationService;
             _cache = cache;
+            _cacheExpiryConfig = cacheExpiryConfig;
             _logger = logger;
         }
 
@@ -235,7 +239,7 @@ namespace ProConnect.Application.Service
             batch.ExhaustedPool = fetched.Count < RecommendationBatchFetchSize;
             batch.TotalCount = await _matchRepository.CountCandidates(userid, criteria);
 
-            await _cache.Set(RecommendationCacheKey(userid), batch, CacheRegion.MATCHRECOMMENDATION, CacheExpiry.MatchRecommendation);
+            await _cache.Set(RecommendationCacheKey(userid), batch, CacheRegion.MATCHRECOMMENDATION, TimeSpan.FromSeconds(_cacheExpiryConfig.matchrecommendation));
 
             return batch;
         }

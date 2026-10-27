@@ -7,7 +7,7 @@ namespace ProConnect.Domain.Model
     /// The fully-resolved result of IFeatureGateService.ResolveEffectivePlan(userid) - what a user's plan
     /// *actually* grants them right now, folding together their UserSubscription row (or lack of one) with
     /// the SubscriptionPlan/PlanFeature catalog. This is the object cached under CacheRegion.EFFECTIVEPLAN
-    /// (CacheExpiry.EffectivePlan), not the raw UserSubscription row, since this is what every feature check
+    /// (TTL from CacheExpiryConfig.effectiveplan), not the raw UserSubscription row, since this is what every feature check
     /// (IsEnabled/TryConsume) actually reads.
     /// </summary>
     public class EffectivePlan

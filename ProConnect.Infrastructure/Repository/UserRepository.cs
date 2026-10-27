@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using NetTopologySuite;
 using NetTopologySuite.Geometries;
 using Npgsql;
+using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
 using ProConnect.Domain.Exception;
 using ProConnect.Domain.Request;
@@ -22,11 +23,13 @@ namespace ProConnect.Infrastructure.Repository
 
         private readonly IDbContextFactory<ProConnectDbContext> _dbContextFactory;
         private readonly Cache _cache;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
 
-        public UserRepository(IDbContextFactory<ProConnectDbContext> dbContextFactory, Cache cache)
+        public UserRepository(IDbContextFactory<ProConnectDbContext> dbContextFactory, Cache cache, CacheExpiryConfig cacheExpiryConfig)
         {
             _dbContextFactory = dbContextFactory;
             _cache = cache;
+            _cacheExpiryConfig = cacheExpiryConfig;
         }
 
         public async Task<SignUpResponse> SignUp(UserRequest request)
@@ -82,7 +85,7 @@ namespace ProConnect.Infrastructure.Repository
 
                 var entity = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.userid == userid && u.is_active);
                 return entity is null ? null : ToDomain(entity);
-            }, CacheRegion.USERPROFILE, CacheExpiry.UserProfile);
+            }, CacheRegion.USERPROFILE, TimeSpan.FromSeconds(_cacheExpiryConfig.userprofile));
         }
 
         public async Task<UserRequest> GetBySub(string sub)
@@ -124,7 +127,7 @@ namespace ProConnect.Infrastructure.Repository
             await db.SaveChangesAsync();
 
             // stale GetById cache entry would otherwise keep serving the pre-edit profile for up to
-            // CacheExpiry.UserProfile
+            // CacheExpiryConfig.userprofile seconds
             await _cache.Delete(UserCacheKey(request.userid), CacheRegion.USERPROFILE);
 
             return ToDomain(entity);
@@ -145,7 +148,7 @@ namespace ProConnect.Infrastructure.Repository
             await db.SaveChangesAsync();
 
             // without this, a cached (pre-deactivation) GetById result could keep this user showing up as
-            // active to callers of ResolveEffectiveCriteria for up to CacheExpiry.UserProfile
+            // active to callers of ResolveEffectiveCriteria for up to CacheExpiryConfig.userprofile seconds
             await _cache.Delete(UserCacheKey(userid), CacheRegion.USERPROFILE);
 
             return true;

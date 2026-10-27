@@ -27,9 +27,10 @@ namespace ProConnect.Infrastructure.Repository
         }
 
         /// <summary>
-        /// `expiry` overrides the configured default TTL for this call only - pass a region-appropriate
-        /// value from a caller (e.g. short for volatile data like search/recommendations, longer for
-        /// rarely-changing data) instead of relying on the single global CacheAsideConfig timeout.
+        /// `expiry` is required (there is no more global default TTL) - pass a region-appropriate value
+        /// from CacheExpiryConfig (e.g. short for volatile data like search/recommendations, longer for
+        /// rarely-changing data like a LinkedIn profile scrape). Throws ArgumentException via Set below if
+        /// omitted.
         /// </summary>
         public async Task<T> Get<T>(string key, Func<Task<T>> getFromOrigin, string region = null, TimeSpan? expiry = null) where T : class, new()
         {
@@ -122,12 +123,20 @@ namespace ProConnect.Infrastructure.Repository
             {
                 if (_config.enablecacheaside && data != null)
                 {
-                    // `expiry`, when given, overrides both the soft (re-fetch-from-origin) and hard
-                    // (Redis TTL) expiry for this call - otherwise both fall back to the configured default.
-                    var cacheAsideExpires = expiry ?? TimeSpan.FromSeconds(_config.cacheasidetimeout);
+                    // `expiry` is required (no more global CacheAsideConfig.Timeout/CacheAsideTimeout
+                    // fallback) - every call site passes a region-appropriate TTL, sourced from
+                    // CacheExpiryConfig, since a single global default meant match recommendations
+                    // (should be near-real-time) cached just as long as LinkedIn profile data (which
+                    // barely changes). It covers both the soft (re-fetch-from-origin) and hard (Redis TTL)
+                    // expiry for this call.
+                    if (!expiry.HasValue)
+                        throw new ArgumentException(
+                            "A cache expiry is required - pass a region-appropriate TTL from CacheExpiryConfig.", nameof(expiry));
+
+                    var cacheAsideExpires = expiry.Value;
 
                     // Defines when to retrieve data from the origin assuming the origin is available
-                    var expiresOn = DateTime.UtcNow + (expiry ?? TimeSpan.FromSeconds(_config.timeout));
+                    var expiresOn = DateTime.UtcNow + expiry.Value;
                     var cacheItem = new CacheItem<T>
                     {
                         ExpiresOn = expiresOn,

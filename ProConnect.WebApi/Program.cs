@@ -170,6 +170,7 @@ internal class Program
         // register Redis
         builder.Services.AddCaching(configuration.GetCacheConfiguration());
         builder.Services.AddCacheAside(configuration.GetCacheAsideConfiguration());
+        builder.Services.AddCacheExpiry(configuration.GetCacheExpiryConfiguration());
 
 
 

@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ProConnect.Application.Interface;
+using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
 using ProConnect.Domain.Model;
 using ProConnect.Infrastructure.Interface;
@@ -15,7 +16,7 @@ namespace ProConnect.Application.Service
     /// limit_value, plus a usage snapshot taken at cache-population time for display) is cached under
     /// CacheRegion.EFFECTIVEPLAN - same cache-aside pattern MatchService uses for CacheRegion.
     /// MATCHRECOMMENDATION. TryConsume deliberately does NOT trust the cached usage snapshot for its
-    /// allow/deny decision (usage changes on every swipe, far more often than CacheExpiry.EffectivePlan's
+    /// allow/deny decision (usage changes on every swipe, far more often than CacheExpiryConfig.effectiveplan's
     /// 10-minute TTL) - it re-reads ISubscriptionRepository.GetFeatureUsage live instead, only using the
     /// cached plan for the (rarely-changing) is_enabled/limit_value/reset_period part.
     /// </summary>
@@ -23,19 +24,21 @@ namespace ProConnect.Application.Service
     {
         private readonly ISubscriptionRepository _subscriptionRepository;
         private readonly Cache _cache;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
         private readonly ILogger<FeatureGateService> _logger;
 
-        public FeatureGateService(ISubscriptionRepository subscriptionRepository, Cache cache, ILogger<FeatureGateService> logger)
+        public FeatureGateService(ISubscriptionRepository subscriptionRepository, Cache cache, CacheExpiryConfig cacheExpiryConfig, ILogger<FeatureGateService> logger)
         {
             _subscriptionRepository = subscriptionRepository;
             _cache = cache;
+            _cacheExpiryConfig = cacheExpiryConfig;
             _logger = logger;
         }
 
         public async Task<EffectivePlan> ResolveEffectivePlan(Guid userid)
         {
             return await _cache.Get(EffectivePlanCacheKey(userid), async () => await ComputeEffectivePlan(userid),
-                CacheRegion.EFFECTIVEPLAN, CacheExpiry.EffectivePlan);
+                CacheRegion.EFFECTIVEPLAN, TimeSpan.FromSeconds(_cacheExpiryConfig.effectiveplan));
         }
 
         public async Task<bool> IsEnabled(Guid userid, string feature_key)

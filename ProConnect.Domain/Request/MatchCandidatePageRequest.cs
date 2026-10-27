@@ -19,8 +19,8 @@ namespace ProConnect.Domain.Request
         /// <summary>
         /// Bypasses (and repopulates) the cached recommendation list before paging. Intended for the client
         /// to set once it has paged through everything currently cached (has_more = false on the last page)
-        /// and wants a fresh recompute right away instead of waiting out the 15-minute
-        /// CacheExpiry.MatchRecommendation TTL. Has no effect on GetIncomingLikes, which was never cached to
+        /// and wants a fresh recompute right away instead of waiting out the CacheExpiryConfig.
+        /// matchrecommendation TTL (15 min by default). Has no effect on GetIncomingLikes, which was never cached to
         /// begin with (see MatchService.GetIncomingLikes).
         /// </summary>
         public bool refresh { get; set; } = false;

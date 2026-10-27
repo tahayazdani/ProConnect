@@ -73,7 +73,11 @@ namespace ProConnect.Infrastructure.Repository
             try
             {
                 var hashedKey = this.GetKeyHash(key, region);
-                var localExpiry = expiry.HasValue ? expiry.Value : this.GetDefaultExpiry();
+                // No global fallback TTL anymore (removed CacheConfig.Timeout) - every caller is expected
+                // to supply a region-appropriate expiry, sourced from CacheExpiryConfig via the Cache
+                // cache-aside wrapper, which guards this the same way before it ever reaches here.
+                var localExpiry = expiry ?? throw new ArgumentException(
+                    "A cache expiry is required - callers must supply a region-appropriate TTL (see CacheExpiryConfig).", nameof(expiry));
                 var ttl = localExpiry.TotalSeconds;
 
                 var cacheItem = new CacheItem<T>()

@@ -13,7 +13,7 @@ namespace ProConnect.Application.Interface
     public interface IFeatureGateService
     {
         /// <summary>
-        /// Resolves + caches (CacheRegion.EFFECTIVEPLAN, CacheExpiry.EffectivePlan) a user's plan and every
+        /// Resolves + caches (CacheRegion.EFFECTIVEPLAN, CacheExpiryConfig.effectiveplan) a user's plan and every
         /// feature it grants, folding in their current usage for counted features. Free (Const.PlanCode.Free)
         /// for a user with no subscription row at all, or whose subscription has lapsed - see
         /// Const.PlanCode remarks.
@@ -38,7 +38,7 @@ namespace ProConnect.Application.Interface
         /// <summary>
         /// Clears the cached EffectivePlan for a user - called by SubscriptionService right after any
         /// subscription write (checkout completed, canceled, plan changed) so the new entitlements are
-        /// visible on the very next check rather than waiting out CacheExpiry.EffectivePlan.
+        /// visible on the very next check rather than waiting out CacheExpiryConfig.effectiveplan's TTL.
         /// </summary>
         Task InvalidateEffectivePlan(Guid userid);
 

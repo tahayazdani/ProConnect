@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using ProConnect.Application.Interface;
+using ProConnect.Domain.Config;
 using ProConnect.Domain.Const;
 using ProConnect.Domain.Model;
 using ProConnect.Domain.Request;
@@ -17,12 +18,14 @@ namespace ProConnect.Application.Service
     {
         private readonly ISearchRepository _searchRepository;
         private readonly Cache _cache;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
         private readonly ILogger<SearchService> _logger;
 
-        public SearchService(ISearchRepository searchRepository, Cache cache, ILogger<SearchService> logger)
+        public SearchService(ISearchRepository searchRepository, Cache cache, CacheExpiryConfig cacheExpiryConfig, ILogger<SearchService> logger)
         {
             _searchRepository = searchRepository;
             _cache = cache;
+            _cacheExpiryConfig = cacheExpiryConfig;
             _logger = logger;
         }
 
@@ -52,7 +55,7 @@ namespace ProConnect.Application.Service
                         page = request.page,
                         pagesize = request.pagesize
                     };
-                }, CacheRegion.SEARCHRESULT, CacheExpiry.SearchResult);
+                }, CacheRegion.SEARCHRESULT, TimeSpan.FromSeconds(_cacheExpiryConfig.searchresult));
 
                 return new ProConnectResponse<SearchResponse>
                 {

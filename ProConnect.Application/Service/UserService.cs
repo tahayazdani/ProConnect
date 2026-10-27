@@ -25,6 +25,7 @@ namespace ProConnect.Application.Service
         private readonly IProfileProvider _profileProvider;
         private readonly IGeocodingProvider _geocodingProvider;
         private readonly ProConnectConfig _proConnectConfig;
+        private readonly CacheExpiryConfig _cacheExpiryConfig;
         private readonly ILogger<UserService> _logger;
         private readonly Cache _cache;
         private readonly ITokenService _tokenService;
@@ -38,7 +39,8 @@ namespace ProConnect.Application.Service
                            Cache cache,
                            ITokenService tokenService,
                            IMatchService matchService,
-                           IOptions<ProConnectConfig> proConnectConfig
+                           IOptions<ProConnectConfig> proConnectConfig,
+                           CacheExpiryConfig cacheExpiryConfig
                            )
         {
             _userRepository = userRepository;
@@ -50,6 +52,7 @@ namespace ProConnect.Application.Service
             _tokenService = tokenService;
             _matchService = matchService;
             _proConnectConfig = proConnectConfig.Value;
+            _cacheExpiryConfig = cacheExpiryConfig;
         }
 
         // Fire-and-forget: UserService/MatchService/Cache are all registered Singleton (see Program.cs),
@@ -689,7 +692,7 @@ namespace ProConnect.Application.Service
             if (string.IsNullOrEmpty(publicIdentifier))
                 return null;
 
-            return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, CacheExpiry.PersonProfile);
+            return await _cache.Get(publicIdentifier, () => _profileProvider.GetProfile(publicIdentifier), CacheRegion.PERSONPROFILE, TimeSpan.FromSeconds(_cacheExpiryConfig.personprofile));
         }
 
         /// <summary>

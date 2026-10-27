@@ -26,8 +26,6 @@ namespace ProConnect.Infrastructure.Repository
             Logger = logger;
         }
 
-        protected TimeSpan GetDefaultExpiry() => TimeSpan.FromSeconds(this.CacheConfig.timeout);
-
         protected virtual string Serialize(
             object value
         )

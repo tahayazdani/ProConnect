@@ -16,7 +16,7 @@ namespace ProConnect.Application.Interface
         /// (MatchRecommendationBatch, ~RecommendationBatchFetchSize rows) into that filtered result set, not
         /// the whole matching pool. The window grows via a cheap offset-paged DB call as a user pages
         /// through it, refilling proactively in the background once few unseen rows remain so paging never
-        /// waits on the DB. Cached for CacheExpiry.MatchRecommendation (15 min) per user. Set request.refresh
+        /// waits on the DB. Cached for CacheExpiryConfig.matchrecommendation seconds (15 min by default) per user. Set request.refresh
         /// to force an immediate rebuild instead of waiting out the TTL (e.g. after criteria change).
         /// </summary>
         Task<ProConnectResponse<MatchCandidatePageResponse>> GetRecommendations(Guid userid, MatchCandidatePageRequest request);
