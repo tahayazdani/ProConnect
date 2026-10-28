@@ -25,6 +25,7 @@
     <ProjectReference Include="..\ProConnect.Application\ProConnect.Application.csproj" />
     <ProjectReference Include="..\ProConnect.Domain\ProConnect.Domain.csproj" />
     <ProjectReference Include="..\ProConnect.Infrastructure\ProConnect.Infrastructure.csproj" />
+    <ProjectReference Include="..\ProConnect.WebApi\ProConnect.WebApi.csproj" />
   </ItemGroup>
 
 </Project>
