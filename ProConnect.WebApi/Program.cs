@@ -219,71 +219,83 @@ internal class Program
         // per-endpoint via [EnableRateLimiting("strict")] on signup/LinkedIn-OAuth entry points and the
         // LinkedIn scraper endpoint (see RateLimitingConfig remarks for why those specifically).
         //
-        // Dedicated IConnectionMultiplexer/IDatabase here rather than reusing RedisCache's - that
-        // connection/IDatabase is private+static to RedisCache (see its remarks), and this store's access
-        // pattern (EVAL of one fixed Lua script, no serialization) doesn't fit ICache's generic get/set
-        // surface. Still points at the same Redis instance/database index as the cache (same cacheConfig
-        // captured above), it's just a second physical connection to it.
-        builder.Services.AddSingleton<IConnectionMultiplexer>(
-            _ => ConnectionMultiplexer.Connect(cacheConfig.connectionstring));
-        builder.Services.AddSingleton<IRateLimiterStore>(serviceProvider =>
-        {
-            var multiplexer = serviceProvider.GetRequiredService<IConnectionMultiplexer>();
-            var database = multiplexer.GetDatabase(cacheConfig.databaseindex);
-            var storeLogger = serviceProvider.GetRequiredService<ILogger<RedisRateLimiterStore>>();
-            return new RedisRateLimiterStore(database, storeLogger);
-        });
-
+        // Entirely gated behind RateLimitingConfig.enabled (see its remarks) - when an upstream gateway
+        // such as Azure API Management already enforces rate limits in front of this app, there's no
+        // need for (and no benefit to) also throttling here, so skip registering the Redis connection,
+        // the store, and AddRateLimiter altogether rather than registering a limiter that's merely never
+        // wired into the pipeline. app.UseRateLimiter() further down is skipped under the same flag.
         var rateLimitingConfig = builder.Configuration.GetSection("ProConnectConfig:RateLimitingConfig").Get<RateLimitingConfig>()
             ?? new RateLimitingConfig();
 
-        builder.Services.AddRateLimiter(options =>
+        if (rateLimitingConfig.enabled)
         {
-            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-
-            // The rate limiting middleware does NOT translate a lease's RetryAfter metadata into a
-            // response header on its own - that's left to this callback by design (see Microsoft's own
-            // sample for OnRejected). Without this, RedisRateLimitLease's RetryAfter metadata (populated
-            // from the Redis key's remaining TTL - see RedisRateLimiterStore.TryAcquireAsync) would be
-            // computed for nothing; a rejected client would get a bare 429 with no indication of when to
-            // retry.
-            options.OnRejected = (context, cancellationToken) =>
+            // Dedicated IConnectionMultiplexer/IDatabase here rather than reusing RedisCache's - that
+            // connection/IDatabase is private+static to RedisCache (see its remarks), and this store's access
+            // pattern (EVAL of one fixed Lua script, no serialization) doesn't fit ICache's generic get/set
+            // surface. Still points at the same Redis instance/database index as the cache (same cacheConfig
+            // captured above), it's just a second physical connection to it.
+            builder.Services.AddSingleton<IConnectionMultiplexer>(
+                _ => ConnectionMultiplexer.Connect(cacheConfig.connectionstring));
+            builder.Services.AddSingleton<IRateLimiterStore>(serviceProvider =>
             {
-                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                var multiplexer = serviceProvider.GetRequiredService<IConnectionMultiplexer>();
+                var database = multiplexer.GetDatabase(cacheConfig.databaseindex);
+                var storeLogger = serviceProvider.GetRequiredService<ILogger<RedisRateLimiterStore>>();
+                return new RedisRateLimiterStore(database, storeLogger);
+            });
+
+            builder.Services.AddRateLimiter(options =>
+            {
+                options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+                // The rate limiting middleware does NOT translate a lease's RetryAfter metadata into a
+                // response header on its own - that's left to this callback by design (see Microsoft's own
+                // sample for OnRejected). Without this, RedisRateLimitLease's RetryAfter metadata (populated
+                // from the Redis key's remaining TTL - see RedisRateLimiterStore.TryAcquireAsync) would be
+                // computed for nothing; a rejected client would get a bare 429 with no indication of when to
+                // retry.
+                options.OnRejected = (context, cancellationToken) =>
                 {
-                    context.HttpContext.Response.Headers.RetryAfter =
-                        ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
-                }
+                    if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                    {
+                        context.HttpContext.Response.Headers.RetryAfter =
+                            ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+                    }
 
-                return ValueTask.CompletedTask;
-            };
+                    return ValueTask.CompletedTask;
+                };
 
-            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
-            {
-                var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
-                return RateLimitPartition.Get(
-                    partitionKey,
-                    key => new RedisFixedWindowRateLimiter(
-                        httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
-                        policyName: "global",
-                        partitionKey: key,
-                        permitLimit: rateLimitingConfig.globalpermitlimit,
-                        window: TimeSpan.FromSeconds(rateLimitingConfig.globalwindowseconds)));
+                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+                {
+                    var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
+                    return RateLimitPartition.Get(
+                        partitionKey,
+                        key => new RedisFixedWindowRateLimiter(
+                            httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
+                            policyName: "global",
+                            partitionKey: key,
+                            permitLimit: rateLimitingConfig.globalpermitlimit,
+                            window: TimeSpan.FromSeconds(rateLimitingConfig.globalwindowseconds)));
+                });
+
+                options.AddPolicy("strict", httpContext =>
+                {
+                    var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
+                    return RateLimitPartition.Get(
+                        partitionKey,
+                        key => new RedisFixedWindowRateLimiter(
+                            httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
+                            policyName: "strict",
+                            partitionKey: key,
+                            permitLimit: rateLimitingConfig.strictpermitlimit,
+                            window: TimeSpan.FromSeconds(rateLimitingConfig.strictwindowseconds)));
+                });
             });
-
-            options.AddPolicy("strict", httpContext =>
-            {
-                var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
-                return RateLimitPartition.Get(
-                    partitionKey,
-                    key => new RedisFixedWindowRateLimiter(
-                        httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
-                        policyName: "strict",
-                        partitionKey: key,
-                        permitLimit: rateLimitingConfig.strictpermitlimit,
-                        window: TimeSpan.FromSeconds(rateLimitingConfig.strictwindowseconds)));
-            });
-        });
+        }
+        else
+        {
+            Console.WriteLine("ProConnectConfig:RateLimitingConfig:Enabled is false - this app's own rate limiting is disabled (expected when an upstream gateway, e.g. Azure API Management, already enforces rate limits in front of this API).");
+        }
 
         // register JWT authentication - builder.Configuration (not the ad hoc `configuration` above)
         // is used here so that user-secrets/environment overrides for the signing key are honored
@@ -391,7 +403,10 @@ internal class Program
         app.UseAuthentication();
         app.UseAuthorization();
         app.UseCookiePolicy();
-        app.UseRateLimiter();
+        if (rateLimitingConfig.enabled)
+        {
+            app.UseRateLimiter();
+        }
         app.MapControllers();
         app.MapHub<MessageHub>("/hubs/messages");
         app.MapHub<NotificationHub>("/hubs/notifications");
