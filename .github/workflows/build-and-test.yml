@@ -1,12 +1,14 @@
 name: Build and Test
 
-# Runs on every push/PR touching main so a broken build or a failing test is caught before it lands,
-# rather than only being discovered manually (which, until this workflow existed, was the only way
-# anyone would find out). Scoped to main plus all PR branches rather than every branch push, since a
-# PR's own CI run already covers feature branches.
+# Runs on every push to every branch, plus every PR targeting main, so a broken build or a failing
+# test is caught on the very next commit rather than only being discovered manually or at merge time.
+# Previously scoped to push-to-main-only on the theory that a PR's own CI run covers feature branches -
+# but this repo's actual workflow is direct pushes to a working branch (develop today) without opening
+# a PR first, so that assumption didn't hold: a push-to-main-only trigger meant CI never ran at all
+# until something eventually got merged to main. No `branches:` filter on `push` below is deliberate -
+# every push to every branch runs this.
 on:
   push:
-    branches: ["main"]
   pull_request:
     branches: ["main"]
 
