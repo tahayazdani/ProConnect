@@ -35,4 +35,10 @@
     <ProjectReference Include="..\ProConnect.Application\ProConnect.Application.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets ProConnect.Tests construct/exercise the internal RateLimiting classes
+         (RateLimitPartitionKeyResolver, RedisFixedWindowRateLimiter, RedisRateLimitLease) directly. -->
+    <InternalsVisibleTo Include="ProConnect.Tests" />
+  </ItemGroup>
+
 </Project>
