@@ -361,3 +361,13 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# macOS Finder metadata - machine-specific, never relevant to the repo
+.DS_Store
+
+# VS Code editor/workspace settings - developer-local, not shared project config
+.vscode/
+
+# Local DB client session files (e.g. a local-docker Postgres session saved from a SQL client) -
+# machine-specific scratch state, not something any other developer's checkout needs
+*.session.sql
