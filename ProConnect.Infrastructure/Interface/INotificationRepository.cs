@@ -29,8 +29,13 @@ namespace ProConnect.Infrastructure.Interface
         /// "0 marked as read" live-update push - same reasoning as IMessageNotifier.NotifyMessagesRead's readCount.</summary>
         Task<int> MarkAllAsRead(Guid userid);
 
-        /// <summary>Defaults to true (fail open) if no row exists for the pair - a brand-new NotificationType
-        /// added to the enum without a corresponding seed row shouldn't silently suppress its own push.</summary>
+        /// <summary>Defaults to false (fail closed) if no row exists for the pair. Every NotificationType
+        /// is expected to seed an explicit row for every NotificationChannel in the same migration that
+        /// introduces it (see NotificationChannelConfigEntityConfiguration) - this default only matters if
+        /// that convention is ever missed, and in that case staying silent (no push, no email) is the safe
+        /// failure direction, not accidentally emailing users for a type nobody reviewed/approved Email for.
+        /// Was previously fail-open (defaulted to true); flipped because fail-open meant a forgotten seed
+        /// row silently enabled Email too, not just Push.</summary>
         Task<bool> IsChannelEnabled(NotificationType type, NotificationChannel channel);
 
         Task<List<UserDeviceToken>> GetDeviceTokens(Guid userid);

@@ -107,8 +107,8 @@ namespace ProConnect.Infrastructure.Repository
             var entity = await db.NotificationChannelConfigs.AsNoTracking()
                 .FirstOrDefaultAsync(c => c.notification_type == type && c.channel == channel);
 
-            // Fail open - see INotificationRepository.IsChannelEnabled remarks.
-            return entity?.is_enabled ?? true;
+            // Fail closed - see INotificationRepository.IsChannelEnabled remarks.
+            return entity?.is_enabled ?? false;
         }
 
         public async Task<List<UserDeviceToken>> GetDeviceTokens(Guid userid)
