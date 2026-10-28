@@ -19,13 +19,15 @@ namespace ProConnect.Application.Service
         private readonly ISearchRepository _searchRepository;
         private readonly Cache _cache;
         private readonly CacheExpiryConfig _cacheExpiryConfig;
+        private readonly IFeatureGateService _featureGateService;
         private readonly ILogger<SearchService> _logger;
 
-        public SearchService(ISearchRepository searchRepository, Cache cache, CacheExpiryConfig cacheExpiryConfig, ILogger<SearchService> logger)
+        public SearchService(ISearchRepository searchRepository, Cache cache, CacheExpiryConfig cacheExpiryConfig, IFeatureGateService featureGateService, ILogger<SearchService> logger)
         {
             _searchRepository = searchRepository;
             _cache = cache;
             _cacheExpiryConfig = cacheExpiryConfig;
+            _featureGateService = featureGateService;
             _logger = logger;
         }
 
@@ -39,6 +41,18 @@ namespace ProConnect.Application.Service
                         issuccessfull = false,
                         errormessage = "Request is required.",
                         message = "Request is required."
+                    };
+
+                // Radius-based search is the same paid-tier feature in Match (see MatchService.UpdateCriteria
+                // and Const.FeatureKey.RadiusSearchEnabled) - previously Search had no feature-gate at all, so
+                // a Free user could get distance-based results here with no paywall while the identical
+                // capability was blocked in Match. See PROJECT_NOTES.md/BUGS_FOUND.md G-35.
+                if (request.radius_km.HasValue && !await _featureGateService.IsEnabled(userid, FeatureKey.RadiusSearchEnabled))
+                    return new ProConnectResponse<SearchResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Radius-based search is a premium feature. Upgrade your plan to filter by distance.",
+                        message = "Radius-based search is a premium feature. Upgrade your plan to filter by distance."
                     };
 
                 var response = await _cache.Get(CacheKey(userid, request), async () =>

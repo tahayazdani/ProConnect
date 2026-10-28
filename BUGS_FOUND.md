@@ -1203,6 +1203,67 @@ any code change. See `TEST_RUN_LOG.md` for the dated entry covering this specifi
 
 ---
 
+## BUG-29 — Search's `radius_km` had no feature-gate at all, unlike Match's paywalled radius [FIXED] (G-35) — found during the pre-frontend backend-readiness review
+
+- **Where:** `SearchService.Search` (ProConnect.Application/Service/SearchService.cs).
+- **Symptom:** A Free-tier user setting `radius_km` on `GET search` got full distance-based results
+  with no paywall of any kind, while the identical capability on `MatchCriteria.radius_km`
+  (`MatchService.UpdateCriteria`) is explicitly gated behind `FeatureKey.RadiusSearchEnabled` and
+  rejected for Free-tier users. Confirmed via code read (no feature-gate dependency anywhere in
+  `SearchService`/`SearchRequestValidator`) - the same product decision was enforced in one domain
+  and silently absent in the other.
+- **Root cause:** `SearchService` was never given a dependency on `IFeatureGateService` when the
+  radius-search feature was later built in Match - the two "same feature, different domain" code
+  paths simply diverged.
+- **Fix applied:** Added `IFeatureGateService` to `SearchService`'s constructor and, before the
+  cached lookup runs, the same `request.radius_km.HasValue && !await
+  _featureGateService.IsEnabled(userid, FeatureKey.RadiusSearchEnabled)` check `UpdateCriteria`
+  already applies, returning the identical "Radius-based search is a premium feature..." rejection
+  instead of calling the repository. A request with no `radius_km` is unaffected and never touches
+  the feature gate.
+- **Reverification:** `dotnet build ProConnect.sln` - 0 errors. New unit tests in
+  `SearchServiceTests.cs` cover: `radius_km` set + feature disabled → rejection without calling
+  `ISearchRepository.Search`; `radius_km` set + feature enabled → unchanged pass-through behavior
+  (the pre-existing test, now explicitly arranging the gate as enabled); `radius_km` unset → the
+  feature gate is never even checked. Full suite: 332/332 passing.
+
+---
+
+## BUG-30 — Malformed route/query values (bad GUIDs, bad enum values) silently bound to a default instead of being rejected [FIXED] (G-6) — found during the pre-frontend backend-readiness review
+
+- **Where:** `ValidateModelStateAttribute.OnActionExecuting`
+  (ProConnect.Application/Validation/ValidateModelStateAttribute.cs).
+- **Symptom:** A malformed route/query value that fails ASP.NET's own model binding (e.g. a
+  `targetUserId` route segment that isn't a valid GUID, or an unparsable enum in `N5`'s `platform`)
+  was never rejected. `Program.cs` sets `SuppressModelStateInvalidFilter = true` (deliberately - it
+  disables `[ApiController]`'s automatic 400 so this app's own FluentValidation-backed envelope is
+  the only error path), but `ValidateModelStateAttribute` only ever acted when a FluentValidation
+  `ValidationResult` had been stashed on `HttpContext.Items`, which never happens for a primitive
+  route/query param with no body validator. Net effect: the action ran anyway with whatever default
+  the model binder fell back to (e.g. `Guid.Empty` for an unparsable GUID) instead of being rejected
+  - affecting every endpoint listed under G-6 (M4/M5/M7/M10/MSG1/MSG2/N3/N5/U2 and others with
+  route/query primitives).
+- **Root cause:** The attribute's early-return (`if no stashed ValidationResult, return`) meant
+  `context.ModelState.IsValid` was only ever consulted in the branch that already had a stashed
+  FluentValidation result - a true model-binding failure with no such stash fell through both
+  checks and set no result at all.
+- **Fix applied:** Restructured `OnActionExecuting` into two branches: (1) a stashed FluentValidation
+  `ValidationResult` present - unchanged existing behavior (500/`VALIDATION` once `ModelState` also
+  disagrees); (2) no stash (missing, or present but not a `ValidationResult`) - now checks
+  `ModelState.IsValid` on its own, and if invalid, returns a clean 400 built directly from
+  `ModelState`'s own errors (same `ProConnectResponse` envelope, `errorcode: "ModelBinding"` per
+  field) instead of silently letting the action proceed.
+- **Reverification:** `dotnet build ProConnect.sln` - 0 errors.
+  `ValidateModelStateAttributeTests.cs` updated/added to cover all four combinations: no stash +
+  valid ModelState → no-op (true no-op case, unchanged); no stash + invalid ModelState → new 400;
+  non-`ValidationResult` stash + invalid ModelState → new 400; stashed failure + invalid ModelState
+  → unchanged 500 path. Full suite: 332/332 passing. Not yet re-verified live against a running
+  API/real malformed route request (e.g. a live `GET matches/{badGuid}` call) - the fix is
+  structural/pure-logic and covered by the new unit tests, but a live confirmation across a sample
+  of the G-6-affected endpoints would be a reasonable follow-up.
+
+---
+
 ## Notes
 
 - Fifteen bugs documented in total (twelve from the original 2026-10-23/24 pass, BUG-13 found

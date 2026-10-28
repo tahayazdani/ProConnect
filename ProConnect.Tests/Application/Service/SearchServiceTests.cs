@@ -1,7 +1,9 @@
 using Microsoft.Extensions.Logging;
 using Moq;
+using ProConnect.Application.Interface;
 using ProConnect.Application.Service;
 using ProConnect.Domain.Config;
+using ProConnect.Domain.Const;
 using ProConnect.Domain.Model;
 using ProConnect.Domain.Request;
 using ProConnect.Domain.Response;
@@ -18,11 +20,14 @@ namespace ProConnect.Tests.Application.Service
     /// set (that branch itself lives in the repository, not here). These tests confirm Search calls the
     /// repository with the exact request/excludeUserId, maps the repository's items (filtering out the
     /// caller) into SearchResultResponse, and carries totalcount/page/pagesize through correctly - for
-    /// both an unset radius_km (plain-text) and a set radius_km (proximity) request.
+    /// both an unset radius_km (plain-text) and a set radius_km (proximity) request. A set radius_km also
+    /// goes through IFeatureGateService.IsEnabled(FeatureKey.RadiusSearchEnabled) first - the same paid-tier
+    /// gate MatchService.UpdateCriteria applies - see the dedicated radius-gate tests below (G-35).
     /// </summary>
     public class SearchServiceTests
     {
         private readonly Mock<ISearchRepository> _searchRepository = new();
+        private readonly Mock<IFeatureGateService> _featureGateService = new();
         private readonly Mock<ICache> _icache = new();
 
         public SearchServiceTests()
@@ -38,7 +43,7 @@ namespace ProConnect.Tests.Application.Service
             var cache = new Cache(new Mock<ILogger<Cache>>().Object, _icache.Object, new CacheAsideConfig { enablecacheaside = true });
             var cacheExpiryConfig = new CacheExpiryConfig { searchresult = 300 };
 
-            return new SearchService(_searchRepository.Object, cache, cacheExpiryConfig, new Mock<ILogger<SearchService>>().Object);
+            return new SearchService(_searchRepository.Object, cache, cacheExpiryConfig, _featureGateService.Object, new Mock<ILogger<SearchService>>().Object);
         }
 
         [Fact]
@@ -113,6 +118,7 @@ namespace ProConnect.Tests.Application.Service
             var userid = Guid.NewGuid();
             var request = new SearchRequest { city = "London", radius_km = 25, page = 2, pagesize = 10 };
 
+            _featureGateService.Setup(f => f.IsEnabled(userid, FeatureKey.RadiusSearchEnabled)).ReturnsAsync(true);
             _searchRepository.Setup(r => r.Search(request, userid)).ReturnsAsync(new SearchResult
             {
                 totalcount = 0,
@@ -128,6 +134,43 @@ namespace ProConnect.Tests.Application.Service
             Assert.Equal(2, response.body!.page);
             Assert.Equal(10, response.body!.pagesize);
             _searchRepository.Verify(r => r.Search(It.Is<SearchRequest>(req => req.radius_km == 25), userid), Times.Once);
+        }
+
+        [Fact]
+        public async Task Search_WithRadiusKmSetButFeatureDisabled_ReturnsFailureWithoutCallingRepository()
+        {
+            var userid = Guid.NewGuid();
+            var request = new SearchRequest { city = "London", radius_km = 25 };
+
+            _featureGateService.Setup(f => f.IsEnabled(userid, FeatureKey.RadiusSearchEnabled)).ReturnsAsync(false);
+
+            var service = CreateService();
+
+            var response = await service.Search(userid, request);
+
+            Assert.False(response.issuccessfull);
+            Assert.Equal("Radius-based search is a premium feature. Upgrade your plan to filter by distance.", response.errormessage);
+            _searchRepository.Verify(r => r.Search(It.IsAny<SearchRequest>(), It.IsAny<Guid>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Search_WithoutRadiusKm_DoesNotCheckFeatureGate()
+        {
+            var userid = Guid.NewGuid();
+            var request = new SearchRequest { city = "London" };
+
+            _searchRepository.Setup(r => r.Search(request, userid)).ReturnsAsync(new SearchResult
+            {
+                totalcount = 0,
+                items = new List<UserRequest>()
+            });
+
+            var service = CreateService();
+
+            var response = await service.Search(userid, request);
+
+            Assert.True(response.issuccessfull);
+            _featureGateService.Verify(f => f.IsEnabled(It.IsAny<Guid>(), It.IsAny<string>()), Times.Never);
         }
 
         [Fact]
