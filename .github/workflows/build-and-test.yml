@@ -1,0 +1,42 @@
+name: Build and Test
+
+# Runs on every push/PR touching main so a broken build or a failing test is caught before it lands,
+# rather than only being discovered manually (which, until this workflow existed, was the only way
+# anyone would find out). Scoped to main plus all PR branches rather than every branch push, since a
+# PR's own CI run already covers feature branches.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pinned to 8.0.x (not just "8.0") so a floating patch bump in the runner image can't silently
+      # change the SDK version CI builds against - matches the net8.0 TargetFramework used by every
+      # project in the solution (see ProConnect.Tests/ProConnect.Tests.csproj etc.).
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore ProConnect.sln
+
+      # --no-restore: restore already happened above as its own step, so a build failure here is
+      # unambiguously a compile error rather than a transient restore/network issue.
+      - name: Build
+        run: dotnet build ProConnect.sln --no-restore --configuration Release
+
+      # ProConnect.Tests (xUnit + Moq) is pure unit tests against mocked IUserRepository /
+      # IRefreshTokenRepository / ITokenService collaborators (see UserServiceTests.cs,
+      # TokenServiceTests.cs, RefreshTokenRequestValidatorTests.cs) - no real Postgres/Redis
+      # connection is required, so this step needs no service containers or connection strings.
+      - name: Test
+        run: dotnet test ProConnect.sln --no-build --configuration Release --verbosity normal

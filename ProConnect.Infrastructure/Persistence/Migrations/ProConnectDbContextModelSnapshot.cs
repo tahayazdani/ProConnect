@@ -575,6 +575,41 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.RefreshTokenEntity", b =>
+                {
+                    b.Property<Guid>("refreshtokenid")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("createdat_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("expiresat_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("replacedbytokenhash")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("revokedat_utc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("tokenhash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("userid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("refreshtokenid");
+
+                    b.HasIndex("tokenhash")
+                        .IsUnique();
+
+                    b.HasIndex("userid");
+
+                    b.ToTable("refresh_token", (string)null);
+                });
+
             modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.SubscriptionPlanEntity", b =>
                 {
                     b.Property<Guid>("planid")
@@ -1044,6 +1079,15 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                     b.HasOne("ProConnect.Infrastructure.Persistence.Entity.SubscriptionPlanEntity", null)
                         .WithMany()
                         .HasForeignKey("planid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("ProConnect.Infrastructure.Persistence.Entity.RefreshTokenEntity", b =>
+                {
+                    b.HasOne("ProConnect.Infrastructure.Persistence.Entity.UserEntity", null)
+                        .WithMany()
+                        .HasForeignKey("userid")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

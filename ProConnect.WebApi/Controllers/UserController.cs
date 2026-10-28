@@ -1,6 +1,7 @@
 ﻿using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using ProConnect.Application.Interface;
 using ProConnect.Application.Validation;
@@ -33,6 +34,7 @@ namespace ProConnect.WebApi.Controllers
         [HttpGet]
         [Route("generateconsentlinkedinloginpage")]
         [AllowAnonymous]
+        [EnableRateLimiting("strict")]
         public async Task<IActionResult> GenerateConsentLinkedInLogInPage()
         {
             var response = await _userService.GenerateConsentLinkedInLogInPage();
@@ -51,6 +53,7 @@ namespace ProConnect.WebApi.Controllers
         [HttpGet]
         [Route("linkedinauthentication")]
         [AllowAnonymous]
+        [EnableRateLimiting("strict")]
         public async Task<IActionResult> LinkedInAuthentication(string code, string state)
         {
             var response = await _userService.LinkedInAuthentication(code, state);
@@ -69,11 +72,39 @@ namespace ProConnect.WebApi.Controllers
         }
 
 
+        /// <summary>
+        /// Redeems a still-valid refresh token (issued alongside the access token by SignUp/
+        /// LinkedInAuthentication - see UserService.IssueTokenPair) for a brand-new access+refresh pair,
+        /// rotating the presented one out so it can't be redeemed again. Deliberately [AllowAnonymous]:
+        /// the whole point is to let a client whose access token has already expired get a new one
+        /// without having to go through LinkedIn sign-in again - requiring a valid bearer token here would
+        /// defeat that. The refresh token value itself is the credential being checked, by
+        /// UserService.RefreshToken.
+        /// </summary>
+        [HttpPost]
+        [Route("refreshtoken")]
+        [AllowAnonymous]
+        [EnableRateLimiting("strict")]
+        public async Task<IActionResult> RefreshToken(RefreshTokenRequest request)
+        {
+            var response = await _userService.RefreshToken(request?.refreshtoken);
+            return StatusCode(response.statuscode, response);
+        }
+
+        /// <summary>
+        /// Revokes the given refresh token so it can no longer be redeemed via /refreshtoken. Same
+        /// [AllowAnonymous] reasoning as /refreshtoken above - a client logging out because its access
+        /// token already expired shouldn't need a valid one just to tell the server to forget its refresh
+        /// token. Body is optional (missing/empty refreshtoken is a no-op success, see
+        /// UserService.Logout) so existing callers that don't send one yet don't start failing.
+        /// </summary>
         [HttpPost]
         [Route("logout")]
-        public IActionResult Logout()
+        [AllowAnonymous]
+        public async Task<IActionResult> Logout(RefreshTokenRequest request)
         {
-            return Ok();
+            var response = await _userService.Logout(request?.refreshtoken);
+            return StatusCode(response.statuscode, response);
         }
 
         #endregion
@@ -91,6 +122,7 @@ namespace ProConnect.WebApi.Controllers
         [HttpPost]
         [Route("signup")]
         [AllowAnonymous]
+        [EnableRateLimiting("strict")]
         public async Task<IActionResult> SignUp(SignUpRequest request)
         {
             var response = await _userService.SignUp(request);
@@ -107,6 +139,7 @@ namespace ProConnect.WebApi.Controllers
         /// </summary>
         [HttpGet]
         [Route("linkedinprofile")]
+        [EnableRateLimiting("strict")]
         public async Task<IActionResult> GetLinkedInProfile(string publicIdentifier)
         {
             var response = await _userService.GetLinkedInProfile(publicIdentifier);

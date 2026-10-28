@@ -19,6 +19,9 @@ namespace ProConnect.Domain.Config
         public GeocodingConfig geocodingConfig { get; set; }
         public StripeConfig stripeConfig { get; set; }
         public PushConfig pushConfig { get; set; }
+        public CorsConfig corsConfig { get; set; }
+        public RateLimitingConfig rateLimitingConfig { get; set; }
+        public ForwardedHeadersConfig forwardedHeadersConfig { get; set; }
 
     }
 }

@@ -30,6 +30,7 @@ namespace ProConnect.Application.Service
         private readonly Cache _cache;
         private readonly ITokenService _tokenService;
         private readonly IMatchService _matchService;
+        private readonly IRefreshTokenRepository _refreshTokenRepository;
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
@@ -39,6 +40,7 @@ namespace ProConnect.Application.Service
                            Cache cache,
                            ITokenService tokenService,
                            IMatchService matchService,
+                           IRefreshTokenRepository refreshTokenRepository,
                            IOptions<ProConnectConfig> proConnectConfig,
                            CacheExpiryConfig cacheExpiryConfig
                            )
@@ -51,8 +53,26 @@ namespace ProConnect.Application.Service
             _cache = cache;
             _tokenService = tokenService;
             _matchService = matchService;
+            _refreshTokenRepository = refreshTokenRepository;
             _proConnectConfig = proConnectConfig.Value;
             _cacheExpiryConfig = cacheExpiryConfig;
+        }
+
+        // Shared by SignUp and LinkedInAuthentication: issues the access token exactly as before, plus a
+        // brand-new refresh token that gets persisted (hashed - see RefreshTokenEntity) so the caller can
+        // later redeem it via RefreshToken instead of forcing a full LinkedIn re-sign-in every time the
+        // short-lived access token expires.
+        private async Task<(string accesstoken, string refreshtoken)> IssueTokenPair(Guid userid, string public_identifier, string email)
+        {
+            var accesstoken = _tokenService.GenerateToken(userid, public_identifier, email);
+            var refreshtoken = _tokenService.GenerateRefreshToken();
+
+            await _refreshTokenRepository.Create(
+                userid,
+                _tokenService.HashToken(refreshtoken),
+                DateTime.UtcNow.AddDays(_proConnectConfig.jwtConfig.refreshtokenexpiryindays));
+
+            return (accesstoken, refreshtoken);
         }
 
         // Fire-and-forget: UserService/MatchService/Cache are all registered Singleton (see Program.cs),
@@ -234,6 +254,8 @@ namespace ProConnect.Application.Service
                 // education
                 // skills
 
+                var (accesstoken, refreshtoken) = await IssueTokenPair(profileResponse.userid, profileResponse.public_identifier, profileResponse.emailaddress);
+
                 // generate ViewModel
                 signUpResponse = new SignUpResponse
                 {
@@ -254,7 +276,8 @@ namespace ProConnect.Application.Service
                     public_identifier = profileResponse.public_identifier,
                     birth_date = profileResponse.birth_date,
                     gender = profileResponse.gender,
-                    token = _tokenService.GenerateToken(profileResponse.userid, profileResponse.public_identifier, profileResponse.emailaddress)
+                    token = accesstoken,
+                    refreshtoken = refreshtoken
                 };
 
                 response = new ProConnectResponse<SignUpResponse>
@@ -439,7 +462,7 @@ namespace ProConnect.Application.Service
                     _logger.LogInformation($"Userid '{existingUser.userid}' signed back in and was reactivated (was previously deactivated).");
                 }
 
-                userInfoResponse.token = _tokenService.GenerateToken(existingUser.userid, existingUser.public_identifier, existingUser.emailaddress);
+                (userInfoResponse.token, userInfoResponse.refreshtoken) = await IssueTokenPair(existingUser.userid, existingUser.public_identifier, existingUser.emailaddress);
 
                 // returning user is about to land on the swipe deck - see TriggerRecommendationWarmUp.
                 TriggerRecommendationWarmUp(_matchService, existingUser.userid);
@@ -609,6 +632,11 @@ namespace ProConnect.Application.Service
                         message = "User not found."
                     };
 
+                // A deactivated account shouldn't be redeemable via a refresh token that was issued while
+                // it was still active - without this, a client holding a live refresh token could keep
+                // silently minting new access tokens for an account the user just took a break from.
+                await _refreshTokenRepository.RevokeAllForUser(userid);
+
                 return new ProConnectResponse<string>
                 {
                     body = "Deactivated",
@@ -642,6 +670,10 @@ namespace ProConnect.Application.Service
                         message = "User not found."
                     };
 
+                // Not calling RevokeAllForUser here - refresh_token's FK to users is OnDelete(Cascade)
+                // (see RefreshTokenEntityConfiguration), so every refresh token row for this user is
+                // already gone along with the user row itself.
+
                 return new ProConnectResponse<string>
                 {
                     body = "Deleted",
@@ -651,6 +683,99 @@ namespace ProConnect.Application.Service
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"DeleteAccount failed for userid '{userid}'.");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Redeems a refresh token for a brand-new access+refresh pair, rotating the presented token out
+        /// (see IRefreshTokenRepository.Rotate / RefreshTokenEntity remarks) so it can never be redeemed a
+        /// second time. An unknown, already-rotated, revoked, or expired token all produce the exact same
+        /// generic failure below by design - distinguishing them in the response would help an attacker
+        /// fingerprint a stolen/replayed token.
+        /// </summary>
+        public async Task<ProConnectResponse<RefreshTokenResponse>> RefreshToken(string refreshtoken)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(refreshtoken))
+                    return new ProConnectResponse<RefreshTokenResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "refreshtoken is required.",
+                        message = "refreshtoken is required."
+                    };
+
+                var tokenhash = _tokenService.HashToken(refreshtoken);
+                var activetoken = await _refreshTokenRepository.GetActiveByHash(tokenhash);
+
+                if (activetoken is null)
+                    return new ProConnectResponse<RefreshTokenResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Refresh token is invalid or has expired. Please sign in again.",
+                        message = "Refresh token is invalid or has expired. Please sign in again."
+                    };
+
+                var user = await _userRepository.GetById(activetoken.userid);
+                if (user is null)
+                {
+                    // The account was deactivated/deleted since this token was issued - GetById is
+                    // filtered by is_active (see its remarks), so this also catches a deactivated user,
+                    // whose tokens DeactivateAccount already revoked anyway; this is just defense in depth
+                    // against any gap between the two.
+                    return new ProConnectResponse<RefreshTokenResponse>
+                    {
+                        issuccessfull = false,
+                        errormessage = "Refresh token is invalid or has expired. Please sign in again.",
+                        message = "Refresh token is invalid or has expired. Please sign in again."
+                    };
+                }
+
+                var newrefreshtoken = _tokenService.GenerateRefreshToken();
+                await _refreshTokenRepository.Rotate(
+                    tokenhash,
+                    _tokenService.HashToken(newrefreshtoken),
+                    DateTime.UtcNow.AddDays(_proConnectConfig.jwtConfig.refreshtokenexpiryindays));
+
+                var newaccesstoken = _tokenService.GenerateToken(user.userid, user.public_identifier, user.emailaddress);
+
+                return new ProConnectResponse<RefreshTokenResponse>
+                {
+                    body = new RefreshTokenResponse { token = newaccesstoken, refreshtoken = newrefreshtoken },
+                    message = "Token has been refreshed successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "RefreshToken failed.");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Revokes the given refresh token outright so it can never be redeemed again - the actual logic
+        /// UserController.Logout was missing (it used to be a bare return Ok()). The paired access token
+        /// keeps working until its own short expiry, same as any stateless-JWT logout without a
+        /// server-side access-token blocklist; this at least stops the client from silently extending the
+        /// session past that via /refreshtoken.
+        /// </summary>
+        public async Task<ProConnectResponse<string>> Logout(string refreshtoken)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(refreshtoken))
+                    await _refreshTokenRepository.Revoke(_tokenService.HashToken(refreshtoken));
+
+                return new ProConnectResponse<string>
+                {
+                    body = "LoggedOut",
+                    message = "Logged out successfully."
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Logout failed.");
                 throw;
             }
         }

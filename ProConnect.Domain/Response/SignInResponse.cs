@@ -22,6 +22,7 @@ namespace ProConnect.Domain.Response
         public string picture { get; set; }
         public locale locale { get; set; }
         public string token { get; set; }
+        public string refreshtoken { get; set; }
     }
 
     public class locale

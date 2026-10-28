@@ -18,16 +18,26 @@ using ProConnect.Infrastructure.Interface;
 using ProConnect.Infrastructure.Persistence;
 using ProConnect.Infrastructure.Provider;
 using ProConnect.Infrastructure.Repository;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using ProConnect.WebApi.DI;
 using ProConnect.WebApi.Filter;
+using ProConnect.WebApi.HealthChecks;
 using ProConnect.WebApi.Hubs;
 using ProConnect.WebApi.Middleware;
+using ProConnect.WebApi.RateLimiting;
 using Serilog;
 using Serilog.Context;
+using StackExchange.Redis;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using System.Configuration;
+using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
 
 
 internal class Program
@@ -97,6 +107,7 @@ internal class Program
         builder.Services.AddSingleton<IGeocodingProvider, NominatimGeocodingProvider>();
         builder.Services.AddSingleton<IUserService, UserService>();
         builder.Services.AddSingleton<IUserRepository, UserRepository>();
+        builder.Services.AddSingleton<IRefreshTokenRepository, RefreshTokenRepository>();
         builder.Services.AddSingleton<ITokenService, TokenService>();
         builder.Services.AddSingleton<IMatchService, MatchService>();
         builder.Services.AddSingleton<IMatchCriteriaRepository, MatchCriteriaRepository>();
@@ -109,6 +120,7 @@ internal class Program
         // matching this project's Singleton-everywhere DI style.
         builder.Services.AddSingleton<IMessageNotifier, SignalRMessageNotifier>();
         builder.Services.AddSingleton<IValidator<SignUpRequest>, SignUpValidator>();
+        builder.Services.AddSingleton<IValidator<RefreshTokenRequest>, RefreshTokenRequestValidator>();
         builder.Services.AddSingleton<IValidator<SearchRequest>, SearchRequestValidator>();
         builder.Services.AddSingleton<IValidator<MatchCandidatePageRequest>, MatchCandidatePageRequestValidator>();
         builder.Services.AddSingleton<IValidator<MessageRequest>, MessageRequestValidator>();
@@ -168,7 +180,11 @@ internal class Program
 
 
         // register Redis
-        builder.Services.AddCaching(configuration.GetCacheConfiguration());
+        // Captured into a local (rather than passed inline like before) because the rate limiter wiring
+        // further down also needs the same connection string/database index for its own IConnectionMultiplexer
+        // - see the IRateLimiterStore registration below.
+        var cacheConfig = configuration.GetCacheConfiguration();
+        builder.Services.AddCaching(cacheConfig);
         builder.Services.AddCacheAside(configuration.GetCacheAsideConfiguration());
         builder.Services.AddCacheExpiry(configuration.GetCacheExpiryConfiguration());
 
@@ -176,6 +192,92 @@ internal class Program
 
         // get application configuration
         builder.Services.Configure<ProConnectConfig>(builder.Configuration.GetSection("ProConnectConfig"));
+
+        // CORS allow-list - previously SetIsOriginAllowed(origin => true) combined with
+        // AllowCredentials(), which let any origin on the internet make credentialed requests against
+        // this API. Empty-by-default in appsettings.json; set real origin(s) per-environment.
+        var corsConfig = builder.Configuration.GetSection("ProConnectConfig:CorsConfig").Get<CorsConfig>()
+            ?? new CorsConfig();
+        if (corsConfig.allowedorigins == null || corsConfig.allowedorigins.Length == 0)
+        {
+            // Serilog's static Log.Logger isn't wired up until builder.Build() runs, so a plain console
+            // write is used here rather than Log.Warning.
+            Console.WriteLine("WARNING: ProConnectConfig:CorsConfig:AllowedOrigins is empty - no browser-based client will be able to call this API cross-origin until it's configured.");
+        }
+
+        // rate limiting - fixed-window, centralized in Redis (via IRateLimiterStore) so every
+        // horizontally-scaled instance of this API enforces exactly one shared count per caller, not an
+        // independent limit per instance. Partitioned per caller via RateLimitPartitionKeyResolver
+        // (authenticated userid when available, else client IP - see its remarks for why IP is only the
+        // fallback). "Global" is a basic backstop applied to every request; "Strict" is opted into
+        // per-endpoint via [EnableRateLimiting("strict")] on signup/LinkedIn-OAuth entry points and the
+        // LinkedIn scraper endpoint (see RateLimitingConfig remarks for why those specifically).
+        //
+        // Dedicated IConnectionMultiplexer/IDatabase here rather than reusing RedisCache's - that
+        // connection/IDatabase is private+static to RedisCache (see its remarks), and this store's access
+        // pattern (EVAL of one fixed Lua script, no serialization) doesn't fit ICache's generic get/set
+        // surface. Still points at the same Redis instance/database index as the cache (same cacheConfig
+        // captured above), it's just a second physical connection to it.
+        builder.Services.AddSingleton<IConnectionMultiplexer>(
+            _ => ConnectionMultiplexer.Connect(cacheConfig.connectionstring));
+        builder.Services.AddSingleton<IRateLimiterStore>(serviceProvider =>
+        {
+            var multiplexer = serviceProvider.GetRequiredService<IConnectionMultiplexer>();
+            var database = multiplexer.GetDatabase(cacheConfig.databaseindex);
+            var storeLogger = serviceProvider.GetRequiredService<ILogger<RedisRateLimiterStore>>();
+            return new RedisRateLimiterStore(database, storeLogger);
+        });
+
+        var rateLimitingConfig = builder.Configuration.GetSection("ProConnectConfig:RateLimitingConfig").Get<RateLimitingConfig>()
+            ?? new RateLimitingConfig();
+
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            // The rate limiting middleware does NOT translate a lease's RetryAfter metadata into a
+            // response header on its own - that's left to this callback by design (see Microsoft's own
+            // sample for OnRejected). Without this, RedisRateLimitLease's RetryAfter metadata (populated
+            // from the Redis key's remaining TTL - see RedisRateLimiterStore.TryAcquireAsync) would be
+            // computed for nothing; a rejected client would get a bare 429 with no indication of when to
+            // retry.
+            options.OnRejected = (context, cancellationToken) =>
+            {
+                if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                {
+                    context.HttpContext.Response.Headers.RetryAfter =
+                        ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+                }
+
+                return ValueTask.CompletedTask;
+            };
+
+            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+            {
+                var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
+                return RateLimitPartition.Get(
+                    partitionKey,
+                    key => new RedisFixedWindowRateLimiter(
+                        httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
+                        policyName: "global",
+                        partitionKey: key,
+                        permitLimit: rateLimitingConfig.globalpermitlimit,
+                        window: TimeSpan.FromSeconds(rateLimitingConfig.globalwindowseconds)));
+            });
+
+            options.AddPolicy("strict", httpContext =>
+            {
+                var partitionKey = RateLimitPartitionKeyResolver.Resolve(httpContext);
+                return RateLimitPartition.Get(
+                    partitionKey,
+                    key => new RedisFixedWindowRateLimiter(
+                        httpContext.RequestServices.GetRequiredService<IRateLimiterStore>(),
+                        policyName: "strict",
+                        partitionKey: key,
+                        permitLimit: rateLimitingConfig.strictpermitlimit,
+                        window: TimeSpan.FromSeconds(rateLimitingConfig.strictwindowseconds)));
+            });
+        });
 
         // register JWT authentication - builder.Configuration (not the ad hoc `configuration` above)
         // is used here so that user-secrets/environment overrides for the signing key are honored
@@ -226,8 +328,42 @@ internal class Program
                 .Build();
         });
 
+        // liveness/readiness probe - checks the same Postgres pool and Redis connection the app
+        // actually depends on (see PostgresHealthCheck/RedisHealthCheck remarks), rather than just
+        // "the process is running". Intended for load balancers/orchestrators, not end users.
+        builder.Services.AddHealthChecks()
+            .AddCheck<PostgresHealthCheck>("postgres")
+            .AddCheck<RedisHealthCheck>("redis");
+
+        // see ForwardedHeadersConfig remarks - how many trusted reverse-proxy hops precede this app in
+        // Azure (App Service's own front end, plus one more per Front Door/App Gateway/APIM instance
+        // added later). Read here (not after builder.Build()) only because that's where every other ad
+        // hoc "ProConnectConfig:X" section is read in this file - it's just plain configuration, no DI
+        // needed to construct it.
+        var forwardedHeadersConfig = builder.Configuration.GetSection("ProConnectConfig:ForwardedHeadersConfig").Get<ForwardedHeadersConfig>()
+            ?? new ForwardedHeadersConfig();
 
         var app = builder.Build();
+
+        // Must run before anything else in the pipeline (including Serilog request logging and HTTPS
+        // redirection) so that httpContext.Connection.RemoteIpAddress/Request.Scheme are corrected for
+        // every downstream middleware and handler, not just the rate limiter - on Azure App Service, the
+        // public internet never reaches this container directly, only Azure's own front end does, so
+        // RemoteIpAddress is Azure's front-end node rather than the real client until this runs.
+        // KnownNetworks/KnownProxies are cleared (not just left at their loopback-only default) because
+        // that default assumes "whoever connects directly to us" needs to be an explicitly-listed proxy
+        // address - on App Service "whoever connects directly to us" IS always Azure's front end by
+        // construction, so there's no fixed address to enumerate. ForwardLimit is still bounded to the
+        // configured hop count specifically so a client-forged leftmost X-Forwarded-For entry beyond
+        // that many hops is never trusted as the "real" client IP.
+        var forwardedHeadersOptions = new ForwardedHeadersOptions
+        {
+            ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+            ForwardLimit = forwardedHeadersConfig.trustedproxyhopcount
+        };
+        forwardedHeadersOptions.KnownNetworks.Clear();
+        forwardedHeadersOptions.KnownProxies.Clear();
+        app.UseForwardedHeaders(forwardedHeadersOptions);
 
         // Configure the HTTP request pipeline.
         if (app.Environment.IsDevelopment())
@@ -240,7 +376,7 @@ internal class Program
         app.UseHttpsRedirection();
         app.UseRouting();
         app.UseCors(x => x
-                       .SetIsOriginAllowed(origin => true)
+                       .WithOrigins(corsConfig.allowedorigins ?? Array.Empty<string>())
                        .AllowAnyMethod()
                        .WithHeaders(new string[] { "accept", "authorization", "content-type", "set-cookie" })
                        .AllowCredentials()
@@ -249,9 +385,31 @@ internal class Program
         app.UseAuthentication();
         app.UseAuthorization();
         app.UseCookiePolicy();
+        app.UseRateLimiter();
         app.MapControllers();
         app.MapHub<MessageHub>("/hubs/messages");
         app.MapHub<NotificationHub>("/hubs/notifications");
+
+        // GET /health - unauthenticated on purpose (load balancers/orchestrators won't have a JWT) but
+        // deliberately does NOT leak exception details/stack traces, just each check's name+status.
+        app.MapHealthChecks("/health", new HealthCheckOptions
+        {
+            ResponseWriter = async (httpContext, report) =>
+            {
+                httpContext.Response.ContentType = "application/json";
+                var payload = new
+                {
+                    status = report.Status.ToString(),
+                    checks = report.Entries.Select(e => new
+                    {
+                        name = e.Key,
+                        status = e.Value.Status.ToString(),
+                        description = e.Value.Description
+                    })
+                };
+                await httpContext.Response.WriteAsync(JsonSerializer.Serialize(payload));
+            }
+        }).AllowAnonymous();
         app.UseMiddleware<LoggingMiddleware>();
         app.UseMiddleware<ExceptionHandlingMiddleware>();
 

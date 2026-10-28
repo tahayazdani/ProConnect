@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace ProConnect.Application.Service
@@ -46,6 +47,24 @@ namespace ProConnect.Application.Service
             );
 
             return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        // 256 bits of entropy from a CSPRNG, URL-safe base64 - plenty to make guessing/brute-forcing
+        // infeasible, and nothing here is derived from user input (unlike the JWT above) so there's no
+        // claims payload to encode.
+        public string GenerateRefreshToken()
+        {
+            var bytes = RandomNumberGenerator.GetBytes(32);
+            return Convert.ToBase64String(bytes)
+                .Replace('+', '-')
+                .Replace('/', '_')
+                .TrimEnd('=');
+        }
+
+        public string HashToken(string rawtoken)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawtoken));
+            return Convert.ToHexString(bytes);
         }
     }
 }

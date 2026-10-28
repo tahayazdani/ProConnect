@@ -33,6 +33,7 @@ namespace ProConnect.Infrastructure.Persistence
         public DbSet<NotificationEntity> Notifications => Set<NotificationEntity>();
         public DbSet<NotificationChannelConfigEntity> NotificationChannelConfigs => Set<NotificationChannelConfigEntity>();
         public DbSet<UserDeviceTokenEntity> UserDeviceTokens => Set<UserDeviceTokenEntity>();
+        public DbSet<RefreshTokenEntity> RefreshTokens => Set<RefreshTokenEntity>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
