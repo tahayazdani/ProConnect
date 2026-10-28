@@ -29,7 +29,17 @@ namespace ProConnect.Infrastructure.Persistence.Configuration
                 SeedRow("00000009", NotificationType.PaymentFailed, NotificationChannel.Push, true),
                 SeedRow("00000010", NotificationType.PaymentFailed, NotificationChannel.Email, false),
                 SeedRow("00000011", NotificationType.SubscriptionCanceled, NotificationChannel.Push, true),
-                SeedRow("00000012", NotificationType.SubscriptionCanceled, NotificationChannel.Email, false)
+                SeedRow("00000012", NotificationType.SubscriptionCanceled, NotificationChannel.Email, false),
+                // Welcome is seeded Email = true (unlike every type above) - see NotificationType.Welcome
+                // remarks: it is the whole reason IEmailGateway/IEmailTemplateRenderer exist, so shipping it
+                // seeded off would defeat the point. Push is deliberately seeded disabled for this one type
+                // (every other type is Push = enabled) - at the moment SignUp fires this notification the
+                // user is already looking at their own new profile in-app, and has no registered device
+                // token yet besides, so a push here would at best be redundant and at worst misleading to a
+                // future maintainer into thinking it actually sends. Welcome is the one notification type
+                // that is genuinely email-shaped (onboarding/CTA) rather than in-app-pull-back-shaped.
+                SeedRow("00000013", NotificationType.Welcome, NotificationChannel.Push, false),
+                SeedRow("00000014", NotificationType.Welcome, NotificationChannel.Email, true)
             );
         }
 

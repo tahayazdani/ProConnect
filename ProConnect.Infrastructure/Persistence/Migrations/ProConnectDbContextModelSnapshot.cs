@@ -241,6 +241,20 @@ namespace ProConnect.Infrastructure.Persistence.Migrations
                             channel = 1,
                             is_enabled = false,
                             notification_type = 5
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000013"),
+                            channel = 0,
+                            is_enabled = false,
+                            notification_type = 6
+                        },
+                        new
+                        {
+                            notificationchannelconfigid = new Guid("55555555-0000-0000-0000-000000000014"),
+                            channel = 1,
+                            is_enabled = true,
+                            notification_type = 6
                         });
                 });
 

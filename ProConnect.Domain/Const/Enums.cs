@@ -88,7 +88,14 @@ namespace ProConnect.Domain.Const
         SubscriptionActivated,
         SubscriptionRenewed,
         PaymentFailed,
-        SubscriptionCanceled
+        SubscriptionCanceled,
+        // Raised once, by UserService.SignUp, right after a brand-new account is created - the one
+        // NotificationType that is campaign/email-first rather than in-app-first (a brand-new user has no
+        // "notifications list" to check yet). Seeded Email = true (unlike every pre-existing type, which
+        // seeds Email = false) - see NotificationChannelConfigEntityConfiguration - because this is the
+        // whole reason IEmailGateway/IEmailTemplateRenderer exist: there is no point shipping a welcome
+        // email feature that is seeded off.
+        Welcome
     }
 
     /// <summary>
