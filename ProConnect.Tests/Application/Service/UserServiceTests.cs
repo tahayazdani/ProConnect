@@ -30,6 +30,7 @@ namespace ProConnect.Tests.Application.Service
         private readonly Mock<ITokenService> _tokenService = new();
         private readonly Mock<IMatchService> _matchService = new();
         private readonly Mock<IRefreshTokenRepository> _refreshTokenRepository = new();
+        private readonly Mock<INotificationService> _notificationService = new();
 
         private UserService CreateService()
         {
@@ -48,6 +49,7 @@ namespace ProConnect.Tests.Application.Service
                 _tokenService.Object,
                 _matchService.Object,
                 _refreshTokenRepository.Object,
+                _notificationService.Object,
                 Options.Create(proConnectConfig),
                 new CacheExpiryConfig());
         }

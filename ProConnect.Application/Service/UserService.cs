@@ -31,6 +31,7 @@ namespace ProConnect.Application.Service
         private readonly ITokenService _tokenService;
         private readonly IMatchService _matchService;
         private readonly IRefreshTokenRepository _refreshTokenRepository;
+        private readonly INotificationService _notificationService;
 
         public UserService(IUserRepository userRepository,
                            IHttpClientUtilities httpClientUtilities,
@@ -41,6 +42,7 @@ namespace ProConnect.Application.Service
                            ITokenService tokenService,
                            IMatchService matchService,
                            IRefreshTokenRepository refreshTokenRepository,
+                           INotificationService notificationService,
                            IOptions<ProConnectConfig> proConnectConfig,
                            CacheExpiryConfig cacheExpiryConfig
                            )
@@ -54,6 +56,7 @@ namespace ProConnect.Application.Service
             _tokenService = tokenService;
             _matchService = matchService;
             _refreshTokenRepository = refreshTokenRepository;
+            _notificationService = notificationService;
             _proConnectConfig = proConnectConfig.Value;
             _cacheExpiryConfig = cacheExpiryConfig;
         }
@@ -83,6 +86,20 @@ namespace ProConnect.Application.Service
         // itself already swallows and logs its own failures, so there is nothing to catch here.
         private static void TriggerRecommendationWarmUp(IMatchService matchService, Guid userid) =>
             _ = Task.Run(() => matchService.WarmRecommendations(userid));
+
+        // Same fire-and-forget shape as TriggerRecommendationWarmUp just above, for the same reason: a new
+        // signup's response (token, profile) must never wait on an email round trip. NotificationService.
+        // Notify already never throws (persist/push/email/live-update are all best-effort/swallowed inside
+        // it), so there is nothing to catch here either - this only exists as its own method so SignUp's
+        // call site reads the same way TriggerRecommendationWarmUp's does.
+        private static void TriggerWelcomeNotification(INotificationService notificationService, Guid userid, string first_name) =>
+            _ = Task.Run(() => notificationService.Notify(
+                userid,
+                NotificationType.Welcome,
+                "Welcome to ProConnect!",
+                string.IsNullOrWhiteSpace(first_name)
+                    ? "Your profile is live - take a look around."
+                    : $"Welcome, {first_name}! Your profile is live - take a look around."));
 
         // Postgres's unique index on emailaddress (and every in-code comparison we do against it) is
         // case-sensitive and whitespace-sensitive by default, but email addresses are not - two users
@@ -289,6 +306,11 @@ namespace ProConnect.Application.Service
                 // brand-new user is about to land on the swipe deck for the first time - see
                 // TriggerRecommendationWarmUp.
                 TriggerRecommendationWarmUp(_matchService, profileResponse.userid);
+
+                // Campaign/welcome email - see TriggerWelcomeNotification. Only fired here (not on every
+                // LinkedInAuthentication sign-in) since Welcome is a true "brand-new account" event, same
+                // "only once" semantics NotificationType.Welcome's doc comment describes.
+                TriggerWelcomeNotification(_notificationService, profileResponse.userid, profileResponse.first_name);
             }
             catch (DuplicateUserException dupEx)
             {

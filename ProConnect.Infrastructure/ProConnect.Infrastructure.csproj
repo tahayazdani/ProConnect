@@ -27,6 +27,15 @@
     <PackageReference Include="StackExchange.Redis" Version="2.7.33" />
     <PackageReference Include="Stripe.net" Version="53.0.0" />
     <PackageReference Include="FirebaseAdmin" Version="3.1.0" />
+    <PackageReference Include="MailKit" Version="4.18.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Email campaign/notification templates - embedded so they ship inside the assembly (no separate
+         deploy step / file-copy to worry about), read back via EmailTemplateRenderer through
+         Assembly.GetManifestResourceStream. Edited in source control like code, not a runtime-editable
+         CMS - see EmailTemplateRenderer remarks for why that trade-off was chosen. -->
+    <EmbeddedResource Include="EmailTemplates\*.html" />
   </ItemGroup>
 
 </Project>

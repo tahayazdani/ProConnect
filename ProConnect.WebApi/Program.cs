@@ -148,6 +148,12 @@ internal class Program
         builder.Services.AddSingleton<INotificationRepository, NotificationRepository>();
         builder.Services.AddSingleton<IPushNotificationGateway, FcmPushNotificationGateway>();
         builder.Services.AddSingleton<INotificationNotifier, SignalRNotificationNotifier>();
+        // Email side of the notification fan-out (campaign emails - welcome email, etc.): IEmailGateway
+        // confines MailKit/SMTP the same way IPushNotificationGateway confines FirebaseAdmin; IEmailTemplateRenderer
+        // resolves a NotificationType to its template under ProConnect.Infrastructure/EmailTemplates (see
+        // both interfaces' remarks). Gated per-type by NotificationChannelConfigEntity same as Push.
+        builder.Services.AddSingleton<IEmailGateway, SmtpEmailGateway>();
+        builder.Services.AddSingleton<IEmailTemplateRenderer, EmailTemplateRenderer>();
         builder.Services.AddSingleton<INotificationService, NotificationService>();
 
 

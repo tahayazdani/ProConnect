@@ -23,17 +23,26 @@ namespace ProConnect.Application.Service
         private readonly INotificationRepository _notificationRepository;
         private readonly IPushNotificationGateway _pushNotificationGateway;
         private readonly INotificationNotifier _notificationNotifier;
+        private readonly IEmailGateway _emailGateway;
+        private readonly IEmailTemplateRenderer _emailTemplateRenderer;
+        private readonly IUserRepository _userRepository;
         private readonly ILogger<NotificationService> _logger;
 
         public NotificationService(
             INotificationRepository notificationRepository,
             IPushNotificationGateway pushNotificationGateway,
             INotificationNotifier notificationNotifier,
+            IEmailGateway emailGateway,
+            IEmailTemplateRenderer emailTemplateRenderer,
+            IUserRepository userRepository,
             ILogger<NotificationService> logger)
         {
             _notificationRepository = notificationRepository;
             _pushNotificationGateway = pushNotificationGateway;
             _notificationNotifier = notificationNotifier;
+            _emailGateway = emailGateway;
+            _emailTemplateRenderer = emailTemplateRenderer;
+            _userRepository = userRepository;
             _logger = logger;
         }
 
@@ -64,6 +73,7 @@ namespace ProConnect.Application.Service
             var response = ToResponse(notification);
 
             await TryPushNotify(userid, type, title, body, related_entity_id);
+            await TryEmailNotify(userid, type, title, body);
             await TryLiveNotify(userid, response);
         }
 
@@ -86,6 +96,38 @@ namespace ProConnect.Application.Service
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, $"Push dispatch failed for a '{type}' notification to userid '{userid}' (notification row was still persisted).");
+            }
+        }
+
+        private async Task TryEmailNotify(Guid userid, NotificationType type, string title, string body)
+        {
+            try
+            {
+                if (!await _notificationRepository.IsChannelEnabled(type, NotificationChannel.Email))
+                    return;
+
+                // IEmailTemplateRenderer.Render returns null when no template file exists yet for `type` -
+                // a silent no-op (see its remarks), same shape as "no device tokens registered" being a
+                // no-op for the push channel just above.
+                var user = await _userRepository.GetById(userid);
+                if (user is null || string.IsNullOrWhiteSpace(user.emailaddress))
+                    return;
+
+                var placeholders = new Dictionary<string, string>
+                {
+                    ["FirstName"] = string.IsNullOrWhiteSpace(user.first_name) ? "there" : user.first_name,
+                    ["Title"] = title,
+                    ["Body"] = body
+                };
+
+                var rendered = _emailTemplateRenderer.Render(type, placeholders);
+                if (rendered is null) return;
+
+                await _emailGateway.SendEmailAsync(user.emailaddress, rendered.Subject, rendered.HtmlBody);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Email dispatch failed for a '{type}' notification to userid '{userid}' (notification row was still persisted).");
             }
         }
 
